@@ -13,9 +13,9 @@ import org.testcontainers.utility.MountableFile;
  * application is configured through the same variables Docker Compose uses and connects with the
  * service role, never as superuser (ADR-0015).
  *
- * <p>The outbox publisher is not scheduled here: Spring keeps several test contexts alive at once,
- * and each would run its own publisher against the same database. Tests that need publishing call
- * {@code OutboxPublisher.publishPending()} explicitly (DI-17).
+ * <p>Neither the outbox publisher nor the Kafka listeners start on their own here: Spring keeps
+ * several test contexts alive at once, and each would run its own publisher and join the same
+ * consumer group. Tests drive them explicitly (DI-17).
  */
 @SpringBootTest
 public abstract class AbstractIntegrationTest {
@@ -48,5 +48,6 @@ public abstract class AbstractIntegrationTest {
         registry.add("DB_PASSWORD", () -> DB_PASSWORD);
         registry.add("KAFKA_BOOTSTRAP_SERVERS", KAFKA::getBootstrapServers);
         registry.add("outbox.publisher.scheduling-enabled", () -> "false");
+        registry.add("messaging.listeners.auto-startup", () -> "false");
     }
 }
