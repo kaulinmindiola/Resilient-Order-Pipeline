@@ -7,8 +7,8 @@ import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Builds the event envelope published to Kafka (AI-CONTEXT §6.2). Values are plain strings
- * (ADR-0004); the domain never sees JSON.
+ * Builds the event envelope published to Kafka. Values are plain strings (ADR-0004); the domain
+ * never sees JSON.
  */
 @Component
 public class EventEnvelopeMapper {
