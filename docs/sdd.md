@@ -147,6 +147,15 @@ The 15 viewpoints in the `sdd-template.md` catalog were evaluated. Twelve were s
 
 ## 3. Design Views
 
+### Diseño del Consumer de `inventory-service`
+
+- **Parser de entrada y separación de mappers:** El servicio implementa un parser dedicado para la entrada (`OrderCreatedEventParser`), totalmente desacoplado del mapper de eventos salientes de outbox. Cualquier estructura inválida o violación de contrato en el mensaje recibido se traduce a `InvalidEventException`, clasificada como no reintentable.
+- **Resolutor explícito del DLT:** Se utiliza un `DeadLetterPublishingRecoverer` configurado para enrutar los mensajes venenosos (poison messages) o aquellos que agoten la política de reintentos hacia el tópico de destino `<topic>.DLT`, manteniendo estrictamente el mismo número de partición del registro original.
+- **Política de consumo (`AckMode.RECORD` y `auto-offset-reset: earliest`):**
+    - `auto.offset.reset = earliest`: Asegura que si el consumer group no posee un offset previo registrado, la lectura inicie desde el principio de las particiones disponibles.
+    - `AckMode.RECORD`: El reconocimiento (acknowledgement) del offset se realiza de forma individual por cada registro procesado de manera exitosa tras completarse la transacción local de base de datos.
+- **Control explícito del ciclo de vida en Tests de Integración (IT):** Los listeners se inician y detienen explícitamente mediante `KafkaListenerEndpointRegistry` en los métodos `@BeforeEach` y `@AfterEach` de las clases base de pruebas (como `AbstractListenerIT`). Esto garantiza que solo un consumer del grupo permanezca activo a la vez, evitando conflictos de concurrencia cuando Spring mantiene múltiples contextos de pruebas en caché.
+- 
 ### 3.1 Context
 
 ```markdown

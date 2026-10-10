@@ -57,11 +57,13 @@ handle(event):
 
 ### Confirmation
 
-* Test 8 (*duplicate*): the same `eventId` delivered twice produces one decrement; the second delivery is a logged no-op.
-* Test 9 (*consumer restart*): restarting `inventory-service` with in-flight messages neither loses nor duplicates effects.
-* Test 12 (*invalid transition*): `InventoryReserved` on a `REJECTED` order is a no-op with no exception and no DLT.
-
-Verified in Phase 7 (`inventory-service`) and Phase 8 (`order-service`).
+Verified by [`DuplicateDeliveryIT`](../../inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/in/kafka/DuplicateDeliveryIT.java)
+(the same event delivered twice decrements stock once and writes one outcome),
+[`ReserveInventoryAtomicityIT`](../../inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/application/ReserveInventoryAtomicityIT.java)
+(a failure rolls back the claim together with the decrement, and the redelivery applies once),
+[`CommittedRejectionIT`](../../inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/in/kafka/CommittedRejectionIT.java)
+(a rejection commits with its claim) and [`ProcessedEventRepositoryIT`](../../inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/out/persistence/ProcessedEventRepositoryIT.java)
+(a concurrent claim waits for the first transaction and is then a duplicate).
 
 ## Pros and Cons of the Options
 

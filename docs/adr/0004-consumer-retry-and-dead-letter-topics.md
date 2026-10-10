@@ -44,10 +44,12 @@ Chosen option: **"`DefaultErrorHandler` + `DeadLetterPublishingRecoverer`"**, be
 
 ### Confirmation
 
-* Test 10 (*poison message*): a message that always fails gets 3 retries with the documented backoff, lands in the DLT, and the consumer processes the following messages; an `InvalidEventException` goes to the DLT with no retries.
-* Test 12 (*invalid transition*): `InventoryReserved` on a `REJECTED` order is a no-op, with no exception and no DLT.
-
-Verified in Phase 7 (and Phase 8 for `order-service`).
+Verified by [`PoisonMessageIT`](../../inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/in/kafka/PoisonMessageIT.java):
+a message that keeps failing receives 4 attempts with gaps of about 1, 2 and 4 seconds, lands
+unchanged on `order.created.DLT` in the same partition, and the next message on that partition is
+then processed; an invalid message is parsed once and dead-lettered without retries.
+[`OrderCreatedEventParserTest`](../../inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/in/kafka/OrderCreatedEventParserTest.java)
+covers every contract violation that is treated as non-retryable.
 
 ## Pros and Cons of the Options
 
