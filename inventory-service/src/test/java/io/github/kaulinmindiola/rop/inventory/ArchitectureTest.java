@@ -36,7 +36,6 @@ class ArchitectureTest {
                     .dependOnClassesThat()
                     .resideInAnyPackage("..application..", "..adapter..");
 
-    // allowEmptyShould is removed once the application package has classes (Phase 7).
     @ArchTest
     static final ArchRule applicationDoesNotDependOnAdapters =
             noClasses()
@@ -44,6 +43,5 @@ class ArchitectureTest {
                     .resideInAPackage("..application..")
                     .should()
                     .dependOnClassesThat()
-                    .resideInAPackage("..adapter..")
-                    .allowEmptyShould(true);
+                    .resideInAPackage("..adapter..");
 }

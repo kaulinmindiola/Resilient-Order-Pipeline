@@ -13,6 +13,19 @@ spring:
     default-schema: ${DB_SCHEMA}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+
+outbox:
+  publisher:
+    polling-interval-ms: ${OUTBOX_POLLING_INTERVAL_MS:5000}
+    scheduling-enabled: true
 
 logging:
   structured:
