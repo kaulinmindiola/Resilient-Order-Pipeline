@@ -21,11 +21,22 @@ spring:
         max.block.ms: 5000
         request.timeout.ms: 5000
         delivery.timeout.ms: 10000
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    listener:
+      ack-mode: record
 
 outbox:
   publisher:
     polling-interval-ms: ${OUTBOX_POLLING_INTERVAL_MS:5000}
     scheduling-enabled: true
+
+messaging:
+  listeners:
+    auto-startup: true
 
 logging:
   structured:
