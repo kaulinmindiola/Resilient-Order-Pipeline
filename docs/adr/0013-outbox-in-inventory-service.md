@@ -43,11 +43,11 @@ Chosen option: **"Outbox in `inventory-service`"**, because publishing after the
 
 ### Confirmation
 
-* Test 14 (*committed rejection*): `InventoryRejected` sits in the outbox and the claim row is committed in the same transaction.
-* Test 3 (*reservation by event*): `OrderCreated` yields `InventoryReserved` or `InventoryRejected` depending on seeded stock.
-* Tests 8 and 9 cover redelivery and restart.
-
-Verified in Phase 7.
+Verified by [`ReserveInventoryIT`](../../inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/application/ReserveInventoryIT.java)
+(the outcome event is written in the same transaction as the reservation) and by
+[`OrderCreatedConsumerIT`](../../inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/in/kafka/OrderCreatedConsumerIT.java)
+(the outcome reaches `inventory.reserved` or `inventory.rejected` through this service's own
+outbox publisher, which is byte-identical to order-service's apart from its package).
 
 ## Pros and Cons of the Options
 
