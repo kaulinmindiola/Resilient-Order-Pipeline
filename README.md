@@ -8,7 +8,9 @@ A reference backend for reliable, event-driven order processing: eventual consis
 
 **Under development. `v0.1.0` has not been released.**
 
-Everything described below is a design goal, not finished functionality. This README will be updated as each part is built and verified, and a quick start will be added once the setup has been tested from a clean clone.
+The pipeline is implemented end to end, and every behaviour listed under
+[Evidence](#evidence) is covered by an automated test that runs in CI. A quick start will be
+added once the setup has been verified from a clean clone.
 
 ## The problem
 
@@ -16,15 +18,30 @@ Creating an order is a synchronous operation, but what comes after it (reserving
 
 This project explores how to keep the business flow coherent despite that gap, without distributed transactions.
 
-## What this project is designed to demonstrate
+## Evidence
 
-- **Transactional Outbox** in both services: state changes and outgoing events are persisted in the same local transaction and published afterwards by a polling publisher.
-- **Idempotent consumers**: duplicate deliveries (inherent to at-least-once messaging) produce the business effect only once.
-- **Retries and Dead Letter Topics**: transient failures are retried with a short backoff (which briefly blocks the partition, a deliberate trade-off); messages that exhaust their retries go to a DLT so they never block subsequent messages indefinitely. Non-recoverable errors (such as an invalid payload) skip the retries and go straight to the DLT.
-- **Stock reservation without overselling** under concurrent requests, delegating atomicity to the database.
-- **Recovery from Kafka outages**: an order that was already persisted is never lost if the broker is down, and its event is published automatically once Kafka returns.
-- **Lightweight hexagonal architecture**: the domain layer has no dependency on Kafka, JPA or Spring, to be enforced by an automated architecture test.
-- **Testing against real infrastructure** (PostgreSQL and Kafka via Testcontainers) instead of mocks, including failure scenarios.
+Every claim of this README is backed by a test. Tests marked ★ are the core evidence of the project.
+System tests run against the real `docker-compose.yml`, with the images built from source.
+
+| # | What is demonstrated | Test | Requirement / decision |
+|---|---|---|---|
+| 1 | An order and its outbox event are committed or rolled back together | [`OrderOutboxAtomicityIT`](order-service/src/test/java/io/github/kaulinmindiola/rop/order/application/OrderOutboxAtomicityIT.java) | REQ-FUNC-004, BR-008 |
+| 2 | Outbox events reach Kafka keyed by order id, and are marked only after the acknowledgement | [`OutboxPublisherIT`](order-service/src/test/java/io/github/kaulinmindiola/rop/order/adapter/out/kafka/OutboxPublisherIT.java) | REQ-FUNC-010, ADR-0001 |
+| 3 | `OrderCreated` leads to `InventoryReserved` or `InventoryRejected` | [`OrderCreatedConsumerIT`](inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/in/kafka/OrderCreatedConsumerIT.java) | REQ-FUNC-012, REQ-FUNC-013 |
+| 4 | Inventory outcomes drive the order to `CONFIRMED` or `REJECTED` | [`InventoryOutcomeConsumerIT`](order-service/src/test/java/io/github/kaulinmindiola/rop/order/adapter/in/kafka/InventoryOutcomeConsumerIT.java) | REQ-FUNC-014, REQ-FUNC-015 |
+| 5 | The full flow, end to end, through the public API | [`HappyPathSystemIT`](system-tests/src/test/java/io/github/kaulinmindiola/rop/system/HappyPathSystemIT.java) | REQ-FUNC-001..015 |
+| 6 | Only a valid, unexpired token signed with our key gets through | [`AuthenticationIT`](order-service/src/test/java/io/github/kaulinmindiola/rop/order/adapter/in/rest/AuthenticationIT.java), [`TokenEndpointIT`](order-service/src/test/java/io/github/kaulinmindiola/rop/order/adapter/in/rest/TokenEndpointIT.java) | REQ-FUNC-007..009, ADR-0005 |
+| 7 ★ | With Kafka down, orders are accepted and none is lost; they complete on their own once it returns | [`KafkaOutageSystemIT`](system-tests/src/test/java/io/github/kaulinmindiola/rop/system/KafkaOutageSystemIT.java), [`OutboxKafkaOutageIT`](order-service/src/test/java/io/github/kaulinmindiola/rop/order/adapter/out/kafka/OutboxKafkaOutageIT.java) | REQ-FUNC-011, ADR-0001 |
+| 8 ★ | The same event delivered twice has a single effect | [`DuplicateDeliveryIT`](inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/in/kafka/DuplicateDeliveryIT.java) | REQ-FUNC-016, ADR-0011 |
+| 9 | A consumer killed with work in flight neither loses nor duplicates any effect | [`ConsumerCrashSystemIT`](system-tests/src/test/java/io/github/kaulinmindiola/rop/system/ConsumerCrashSystemIT.java) | ADR-0011 |
+| 10 ★ | A failing message is retried with backoff, then dead-lettered; invalid messages are never retried | [`PoisonMessageIT`](inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/in/kafka/PoisonMessageIT.java) | REQ-REL-001, ADR-0004 |
+| 11 ★ | Concurrent reservations never oversell and never deadlock | [`ConcurrentReservationIT`](inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/out/persistence/ConcurrentReservationIT.java) | BR-015, ADR-0010 |
+| 12 | An invalid state transition is a recorded no-op, not an error | [`InvalidTransitionIT`](order-service/src/test/java/io/github/kaulinmindiola/rop/order/adapter/in/kafka/InvalidTransitionIT.java) | BR-014, REQ-FUNC-019 |
+| 13 | Events of one order land in one partition and are consumed in order | [`PartitionOrderingIT`](order-service/src/test/java/io/github/kaulinmindiola/rop/order/adapter/out/kafka/PartitionOrderingIT.java) | ADR-0003, ADR-0012 |
+| 14 | A stock rejection is committed as a result, decrements nothing and is never dead-lettered | [`CommittedRejectionIT`](inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/in/kafka/CommittedRejectionIT.java) | BR-015, ADR-0010 |
+| 15 | Each service's database role cannot touch the other service's schema | [`SchemaIsolationIT`](order-service/src/test/java/io/github/kaulinmindiola/rop/order/SchemaIsolationIT.java) | ADR-0002, ADR-0015 |
+| 16 | An order can be followed across services in JSON logs, and no secret is ever logged | [`StructuredLogsSystemIT`](system-tests/src/test/java/io/github/kaulinmindiola/rop/system/StructuredLogsSystemIT.java) | REQ-OBS-001, REQ-SEC-002 |
+| — | The domain depends on no infrastructure | [`ArchitectureTest` (order)](order-service/src/test/java/io/github/kaulinmindiola/rop/order/ArchitectureTest.java), [`ArchitectureTest` (inventory)](inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/ArchitectureTest.java) | REQ-MAINT-001, ADR-0006 |
 
 ## Scope
 
@@ -122,17 +139,17 @@ The core claims of this project are meant to be proven by tests, not asserted. T
 
 ## Building from source
 
-Requires JDK 21 and a running Docker engine (integration tests use Testcontainers).
+System tests start the real Docker Compose stack, so stop any running stack first:
 
 ```powershell
-.\mvnw.cmd clean verify      # Windows (PowerShell)
+docker compose down
+.\mvnw.cmd -Psystem-tests -pl system-tests verify      # Windows (PowerShell)
 ```
 
 ```bash
-./mvnw clean verify          # Linux / macOS
+docker compose down
+./mvnw -Psystem-tests -pl system-tests verify          # Linux / macOS
 ```
-
-A full quick start with Docker Compose will be added once it has been verified from a clean clone.
 
 ## License
 

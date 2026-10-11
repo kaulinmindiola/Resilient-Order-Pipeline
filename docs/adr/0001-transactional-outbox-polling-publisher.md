@@ -64,7 +64,9 @@ and [`OutboxRepublicationIT`](../../order-service/src/test/java/io/github/kaulin
 against a real broker, and by [`OutboxKafkaOutageIT`](../../order-service/src/test/java/io/github/kaulinmindiola/rop/order/adapter/out/kafka/OutboxKafkaOutageIT.java):
 with the broker paused, orders are still created and their events stay pending; once it resumes,
 every event is published without intervention, and any duplicate carries the same `eventId`.
-Scheduled execution end to end will be verified by the system tests.
+End to end, with the real scheduler, [`KafkaOutageSystemIT`](../../system-tests/src/test/java/io/github/kaulinmindiola/rop/system/KafkaOutageSystemIT.java)
+shows that orders created while the broker is paused stay pending across several publisher cycles
+and reach their terminal status on their own once it resumes, with stock decremented exactly once.
 
 ## Pros and Cons of the Options
 
