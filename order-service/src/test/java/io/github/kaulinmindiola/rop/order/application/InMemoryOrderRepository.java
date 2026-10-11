@@ -11,10 +11,12 @@ import java.util.UUID;
 final class InMemoryOrderRepository implements OrderRepository {
 
     private final Map<UUID, Order> orders = new HashMap<>();
+    private int saves;
 
     @Override
     public void save(Order order) {
         orders.put(order.id(), order);
+        saves++;
     }
 
     @Override
@@ -24,5 +26,9 @@ final class InMemoryOrderRepository implements OrderRepository {
 
     int size() {
         return orders.size();
+    }
+
+    int saves() {
+        return saves;
     }
 }
