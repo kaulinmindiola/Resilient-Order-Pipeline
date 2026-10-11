@@ -1,22 +1,161 @@
 # Resilient Order Pipeline
 
-[![CI](https://github.com/kaulinmindiola/resilient-order-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/<tu-usuario>/resilient-order-pipeline/actions/workflows/ci.yml)
+[![CI](https://github.com/kaulinmindiola/resilient-order-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/kaulinmindiola/resilient-order-pipeline/actions/workflows/ci.yml)
 
-A reference backend for reliable, event-driven order processing: eventual consistency and fault tolerance across two services, built on Kafka and PostgreSQL.
-
-## Status
-
-**Under development. `v0.1.0` has not been released.**
-
-The pipeline is implemented end to end, and every behaviour listed under
-[Evidence](#evidence) is covered by an automated test that runs in CI. A quick start will be
-added once the setup has been verified from a clean clone.
+A reference backend for reliable, event-driven order processing: eventual consistency and fault
+tolerance across two services, built on Kafka and PostgreSQL, and proven by tests that break the
+system on purpose.
 
 ## The problem
 
-Creating an order is a synchronous operation, but what comes after it (reserving stock, confirming or rejecting the order) happens asynchronously in another service. These steps cannot be wrapped in a single ACID transaction. The naive approach of "save to the database, then publish to Kafka" is a dual write: if the process crashes between the two steps, the order exists but the event is lost, and the order stays in `PENDING` forever.
+Creating an order is a synchronous operation, but what comes after it (reserving stock, confirming
+or rejecting the order) happens asynchronously in another service. These steps cannot be wrapped in a
+single ACID transaction. The naive approach of "save to the database, then publish to Kafka" is a dual
+write: if the process crashes between the two steps, the order exists but the event is lost, and the
+order stays in `PENDING` forever.
 
-This project explores how to keep the business flow coherent despite that gap, without distributed transactions.
+This project keeps the business flow coherent despite that gap, without distributed transactions.
+
+## What it demonstrates
+
+- **Transactional Outbox** in both services: state changes and outgoing events are persisted in the
+  same local transaction and published afterwards by a polling publisher, which marks an event only
+  after the broker acknowledged it.
+- **Idempotent consumers**: delivery is at-least-once, and duplicates (redeliveries, ambiguous
+  timeouts, crashes) produce their business effect exactly once, enforced by a primary key.
+- **Retries and Dead Letter Topics**: transient failures are retried with a short backoff (which
+  briefly blocks the partition, a deliberate trade-off); invalid messages go straight to a DLT and
+  never block subsequent messages.
+- **Stock reservation without overselling or deadlocks** under concurrent requests, delegating
+  atomicity to the database and rolling back to a savepoint when a reservation is rejected.
+- **Recovery from failures**: with Kafka down, orders are still accepted and none is lost; a consumer
+  killed with work in flight neither loses nor duplicates anything.
+- **Lightweight hexagonal architecture**: the domain depends on no infrastructure, enforced by an
+  automated architecture test.
+- **Testing against real infrastructure**: PostgreSQL and Kafka via Testcontainers, and black-box
+  system tests against the real Docker Compose stack, including failure scenarios.
+
+Every item is backed by a test: see [Evidence](#evidence).
+
+## Architecture
+
+```mermaid
+flowchart LR
+    client([API client]) -- "REST + JWT" --> order[order-service]
+    order -- "order + outbox event<br/>one transaction" --> orderdb[(order_service schema)]
+    order -. "polling publisher" .-> created[[order.created]]
+    created --> inventory[inventory-service]
+    inventory -- "claim + reservation + outbox event<br/>one transaction" --> inventorydb[(inventory_service schema)]
+    inventory -. "polling publisher" .-> outcome[[inventory.reserved / inventory.rejected]]
+    outcome --> order
+```
+
+- Two independent Spring Boot services. They share one PostgreSQL instance, but each owns its schema
+  and its database role: neither can read the other's tables, and a test proves it.
+- They communicate exclusively through Kafka (KRaft mode). PostgreSQL is the source of truth for all
+  business state; Kafka is transport only.
+- Each service has its own outbox. Consumers record every processed event, so redeliveries are no-ops.
+- Failing messages are retried 3 times (1 s, 2 s, 4 s) and then sent to `<topic>.DLT`.
+
+Order lifecycle:
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: POST /api/v1/orders
+    PENDING --> CONFIRMED: InventoryReserved
+    PENDING --> REJECTED: InventoryRejected
+    CONFIRMED --> [*]
+    REJECTED --> [*]
+```
+
+`CONFIRMED` and `REJECTED` are terminal: a late or contradictory event is recorded and ignored, never
+treated as an error.
+
+## Quick start
+
+Requirements: Docker with Docker Compose, running. Nothing else: the images build the code.
+
+```powershell
+# Windows (PowerShell)
+git clone https://github.com/kaulinmindiola/resilient-order-pipeline.git
+cd resilient-order-pipeline
+Copy-Item .env.example .env
+docker compose up --build -d
+```
+
+```bash
+# Linux / macOS
+git clone https://github.com/kaulinmindiola/resilient-order-pipeline.git
+cd resilient-order-pipeline
+cp .env.example .env
+docker compose up --build -d
+```
+
+The first build downloads base images and dependencies and can take several minutes. The services are
+ready when `docker compose logs order-service` shows `Started OrderServiceApplication`.
+
+Get a token, create an order and read it back:
+
+```powershell
+# Windows (PowerShell)
+$token = (Invoke-RestMethod -Method Post -Uri http://localhost:8080/auth/token -ContentType "application/json" `
+    -Body '{"clientId":"demo-client","clientSecret":"demo-secret-change-me"}').accessToken
+$headers = @{ Authorization = "Bearer $token" }
+$order = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/orders -Headers $headers `
+    -ContentType "application/json" -Body '{"items":[{"productId":"SKU-001","quantity":2}]}'
+Invoke-RestMethod -Uri "http://localhost:8080/api/v1/orders/$($order.orderId)" -Headers $headers
+```
+
+```bash
+# Linux / macOS (requires jq)
+TOKEN=$(curl -s -X POST localhost:8080/auth/token -H 'Content-Type: application/json' \
+  -d '{"clientId":"demo-client","clientSecret":"demo-secret-change-me"}' | jq -r .accessToken)
+ORDER_ID=$(curl -s -X POST localhost:8080/api/v1/orders -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"items":[{"productId":"SKU-001","quantity":2}]}' | jq -r .orderId)
+curl -s localhost:8080/api/v1/orders/$ORDER_ID -H "Authorization: Bearer $TOKEN"
+```
+
+The order starts `PENDING` and becomes `CONFIRMED` within about ten seconds: run the last command
+again. The seeded catalog lets you try every outcome:
+
+| Product | Stock | Result |
+|---|---|---|
+| `SKU-001` | 1000 | `CONFIRMED` |
+| `SKU-002` | 1 | `CONFIRMED` once, then `REJECTED` |
+| `SKU-003` | 0 | `REJECTED` (insufficient stock) |
+| `SKU-004` | no stock row | `REJECTED` (unknown product in inventory) |
+| `SKU-999` | not in the catalog | `422` on creation |
+
+[`docs/requests.http`](docs/requests.http) contains the same requests for IntelliJ's HTTP client.
+
+Stop everything and delete the data with `docker compose down -v`. The stack publishes ports 8080
+(API), 5432 (PostgreSQL) and 9094 (Kafka).
+
+### See it survive a Kafka outage
+
+```bash
+docker compose pause kafka
+# create an order as above: it is accepted (201) and stays PENDING
+docker compose unpause kafka
+# read it again: within seconds it is CONFIRMED, with no manual action
+```
+
+While Kafka is down, the order and its event wait in PostgreSQL. When Kafka returns, the outbox
+publisher sends the event and the pipeline completes on its own.
+
+## API
+
+| Endpoint | Auth | Success | Errors |
+|---|---|---|---|
+| `POST /auth/token` | — | `200` with a Bearer token valid for 30 minutes | `400`, `401` |
+| `POST /api/v1/orders` | Bearer | `201` with `orderId` and `Location` header | `400`, `401`, `422` |
+| `GET /api/v1/orders/{id}` | Bearer | `200` with status, items and total | `400`, `401`, `404` |
+
+Clients never send prices: they come from the catalog. Every error is an RFC 9457 `ProblemDetail`
+and never exposes internal details.
+
+`POST /auth/token` is a deliberately minimal credential exchange, **not OAuth2**: issuing tokens is
+custom, while validating them relies on Spring Security's resource server. See the limitations below.
 
 ## Evidence
 
@@ -43,114 +182,98 @@ System tests run against the real `docker-compose.yml`, with the images built fr
 | 16 | An order can be followed across services in JSON logs, and no secret is ever logged | [`StructuredLogsSystemIT`](system-tests/src/test/java/io/github/kaulinmindiola/rop/system/StructuredLogsSystemIT.java) | REQ-OBS-001, REQ-SEC-002 |
 | — | The domain depends on no infrastructure | [`ArchitectureTest` (order)](order-service/src/test/java/io/github/kaulinmindiola/rop/order/ArchitectureTest.java), [`ArchitectureTest` (inventory)](inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/ArchitectureTest.java) | REQ-MAINT-001, ADR-0006 |
 
-## Scope
-
-A single release, `v0.1.0`, with no planned follow-up phases.
-
-**This is not an e-commerce application.** The business domain is deliberately minimal; it exists only to give the event-driven patterns something real to operate on.
-
-Out of scope: UI, payments, user management, OAuth2 or external identity providers, Kubernetes or cloud deployment, Saga frameworks, and end-to-end exactly-once delivery.
-
-## Architecture at a glance
-
-Two independent Spring Boot services, `order-service` and `inventory-service`, share a single PostgreSQL instance but each owns its own schema and database role, so neither can query the other's tables. They communicate exclusively through Kafka (KRaft mode, no ZooKeeper). Each service has its own outbox. Delivery is at-least-once, and correctness comes from consumer idempotency rather than from broker guarantees. PostgreSQL is the source of truth for all business state; Kafka is transport only.
-
-The environment is designed to run as four containers (`order-service`, `inventory-service`, `postgres`, `kafka`) with a single `docker compose up --build`.
-
-### Target flow
-
-```mermaid
-sequenceDiagram
-    participant C as API client
-    participant O as order-service
-    participant K as Kafka
-    participant I as inventory-service
-    C->>O: POST /api/v1/orders
-    O->>O: TX: order (PENDING) + outbox event
-    O-->>C: 201 PENDING
-    O->>K: order.created (polling publisher)
-    K->>I: OrderCreated
-    I->>I: TX: claim + reserve stock + outbox event
-    I->>K: inventory.reserved | inventory.rejected
-    K->>O: InventoryReserved | InventoryRejected
-    O->>O: TX: claim + CONFIRMED | REJECTED
-```
-
-An order starts as `PENDING` and ends as `CONFIRMED` or `REJECTED`, both terminal.
-
 ## Key design decisions
 
-Full records, including alternatives and consequences, live in [`docs/adr`](docs/adr/README.md).
+Each decision is recorded as an ADR in [`docs/adr`](docs/adr), with the options considered, the
+trade-offs accepted and the tests that confirm it.
 
-| Decision | ADR |
+| ADR | Decision |
 |---|---|
-| Outbox published by an embedded polling publisher | [0001](docs/adr/0001-transactional-outbox-polling-publisher.md) |
-| One schema and one role per service in a single PostgreSQL instance | [0002](docs/adr/0002-schema-and-role-per-service.md) |
-| Message key = aggregate ID, for per-order ordering | [0003](docs/adr/0003-partition-key-aggregate-id.md) |
-| Retries with exponential backoff and dead-letter topics | [0004](docs/adr/0004-consumer-retry-and-dead-letter-topics.md) |
-| Self-issued JWT validated by a Resource Server | [0005](docs/adr/0005-self-issued-jwt-with-resource-server.md) |
-| Lightweight hexagonal architecture | [0006](docs/adr/0006-lightweight-hexagonal-architecture.md) |
-| Stock reservation with a conditional `UPDATE` and savepoint | [0010](docs/adr/0010-atomic-conditional-update-for-stock-reservation.md) |
-| Idempotent consumers in one local transaction | [0011](docs/adr/0011-idempotent-consumer-single-local-transaction.md) |
-| Outbox in both services | [0013](docs/adr/0013-outbox-in-inventory-service.md) |
-| Independent services, no shared module | [0016](docs/adr/0016-independent-services-no-shared-module.md) |
+| 0001 | Embedded polling publisher for the outbox: ack, then mark; delivery is at-least-once |
+| 0002 · 0015 | One schema and one owner role per service in a single PostgreSQL instance |
+| 0003 · 0012 | Partition key = order id; 3 partitions declared at startup, auto-creation disabled |
+| 0004 | Retry with exponential backoff, then a Dead Letter Topic; invalid messages are not retried |
+| 0005 | Self-issued HS256 tokens validated by Spring Security's resource server; not OAuth2 |
+| 0006 | Lightweight hexagonal architecture, enforced by ArchUnit |
+| 0010 | Stock reserved with a conditional `UPDATE` in a fixed lock order; rejection rolls back to a savepoint |
+| 0011 | A consumer claims the event, applies its effect and writes its outbox in one transaction |
+| 0013 · 0016 | Each service has its own outbox; shared code is duplicated deliberately, not put in a library |
+| 0018 | JPA only for the order aggregate; `JdbcClient` for technical tables and stock |
 
-## Planned evidence
+## Known limitations
 
-The core claims of this project are meant to be proven by tests, not asserted. This table will be completed with links and results as each test is implemented.
+These are deliberate scope decisions for `v0.1.0`, not oversights.
 
-| Claim | Test | Status |
-|---|---|---|
-| Kafka down does not lose a persisted order | Kafka outage: orders return `201`, events publish after recovery | Planned |
-| A duplicate event produces its effect once | Same `eventId` delivered twice, one stock decrement | Planned |
-| A poison message ends in the DLT without blocking | 3 retries with backoff, then DLT; next messages processed | Planned |
-| No overselling under concurrency | N concurrent reservations, stock for one, exactly one succeeds | Planned |
+- **An order can stay `PENDING`** if its event ends up in a dead letter topic: there is no
+  compensation and no DLT replay. The message is preserved in `<topic>.DLT` for inspection.
+- **Reserved stock is never released**: there is no cancellation or reservation expiry.
+- **The rejection reason is only logged**, not stored with the order.
+- **Publication latency is bounded by the polling interval** (5 s by default), and processed outbox
+  rows are never purged.
+- **One instance per service**: running several outbox publishers concurrently would require row
+  locking (`FOR UPDATE SKIP LOCKED`) or change data capture.
+- **One Kafka broker** with replication factor 1: no broker fault tolerance.
+- **Authentication is minimal**: no OAuth2, no refresh tokens, no key rotation, no rate limiting on
+  `/auth/token`, and no HTTPS.
 
-## Known limitations (by design)
+## Building and testing
 
-- An order whose event reaches the DLT stays `PENDING`; there is no compensation or DLT replay.
-- Reserved stock is never released (no cancellation or expiry).
-- Publication latency is up to the polling interval (5 s by default), and the outbox is not purged.
-- One instance per service; no horizontal scaling.
-- `POST /auth/token` is a custom credential exchange, **not OAuth2**. HTTP only, no rate limiting.
-- Single-node Kafka (replication factor 1) and a single shared PostgreSQL instance.
+Requires JDK 21 and a running Docker engine (integration tests use Testcontainers).
 
-## Tech stack
+```powershell
+.\mvnw.cmd clean verify                                 # Windows (PowerShell)
+```
 
-- **Language:** Java 21
-- **Framework:** Spring Boot 4.1.1 (Spring Framework 7)
-- **Build:** Maven (multi-module) with Maven Wrapper
-- **Database:** PostgreSQL 16, with Flyway migrations
-- **Persistence:** JPA for the `Order` aggregate, `JdbcClient` for outbox, stock and technical tables
-- **Messaging:** Apache Kafka 4.2.2 (KRaft) with Spring Kafka
-- **Security:** Spring Security 7 Resource Server with self-issued JWT (HS256)
-- **Logging:** Spring Boot structured logging (Logstash JSON format) with MDC
-- **Testing:** JUnit Jupiter, AssertJ, Awaitility, ArchUnit and Testcontainers 2
-- **Code style:** Spotless (google-java-format)
-- **Environment:** Docker Compose
-- **CI:** GitHub Actions and Dependabot
-
-## Documentation
-
-- [`docs/adr`](docs/adr/README.md): architecture decision records (ADR-0001 to ADR-0018)
-- `docs/srs.md`: requirements specification *(planned)*
-- `docs/sdd.md`: design description *(planned)*
-- `docs/events.md`: event contracts *(planned)*
-
-## Building from source
+```bash
+./mvnw clean verify                                     # Linux / macOS
+```
 
 System tests start the real Docker Compose stack, so stop any running stack first:
 
 ```powershell
 docker compose down
-.\mvnw.cmd -Psystem-tests -pl system-tests verify      # Windows (PowerShell)
+.\mvnw.cmd -Psystem-tests -pl system-tests verify       # Windows (PowerShell)
 ```
 
 ```bash
 docker compose down
-./mvnw -Psystem-tests -pl system-tests verify          # Linux / macOS
+./mvnw -Psystem-tests -pl system-tests verify           # Linux / macOS
 ```
+
+CI runs both suites on every push and pull request.
+
+## Project layout
+
+```
+order-service/       REST API, order aggregate, outbox, inventory outcome consumer
+inventory-service/   OrderCreated consumer, atomic stock reservation, outbox
+system-tests/        black-box tests against the real Docker Compose stack
+infra/postgres/      init script: one schema and one owner role per service
+docs/                requirements, design, ADRs, event contracts, request collection
+```
+
+## Documentation
+
+- [Software requirements specification](docs/srs.md): business rules and requirements (`BR-*`, `REQ-*`)
+- [Software design description](docs/sdd.md): architecture, data model, flows and configuration
+- [Architecture decision records](docs/adr)
+- [Event contracts](docs/events.md)
+- [Request collection](docs/requests.http)
+
+## Tech stack
+
+- **Language:** Java 21
+- **Framework:** Spring Boot 4.1 (Spring Framework 7)
+- **Build:** Maven (multi-module), with the Maven Wrapper
+- **Database:** PostgreSQL 16, with Flyway migrations
+- **Messaging:** Apache Kafka 4.2 (KRaft) with Spring Kafka
+- **Security:** Spring Security 7 resource server with self-issued JWT (HS256)
+- **Logging:** Spring Boot structured logging (JSON) with MDC correlation
+- **Testing:** JUnit Jupiter, AssertJ, Testcontainers 2, Awaitility, ArchUnit
+- **Environment:** Docker Compose
+- **CI:** GitHub Actions, Dependabot
 
 ## License
 
-Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+Licensed under the Apache License 2.0. See [LICENSE](LICENSE). All dependencies use permissive or
+weak-copyleft licenses.
