@@ -71,6 +71,10 @@ shows that a failed transition rolls back its claim so the redelivery is applied
 shows that duplicates, unknown orders and invalid transitions are recorded no-ops that never reach
 the dead letter topic.
 
+End to end, [`ConsumerCrashSystemIT`](../../system-tests/src/test/java/io/github/kaulinmindiola/rop/system/ConsumerCrashSystemIT.java)
+kills `inventory-service` with SIGKILL while it has work in flight; after it restarts, every order is
+confirmed, stock is decremented exactly once per order and each event is claimed exactly once.
+
 ## Pros and Cons of the Options
 
 ### Single local transaction with insert-based claim

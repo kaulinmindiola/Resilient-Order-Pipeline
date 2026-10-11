@@ -42,7 +42,10 @@ Chosen option: **"Native structured logging + MDC"**, because it produces correl
 
 ### Confirmation
 
-Test 16 (*logs*): the JSON logs of the flow contain `orderId` and `eventId`, and the `Authorization` header, tokens and secrets never appear. Verified in Phase 9; the format is configured from Phase 1.
+Verified by [`StructuredLogsSystemIT`](../../system-tests/src/test/java/io/github/kaulinmindiola/rop/system/StructuredLogsSystemIT.java)
+on the real container output: every step of an order's journey is a JSON line carrying `orderId`,
+event handling also carries `eventId`, and no access token, client secret, signing key or password
+appears in any log.
 
 ## Pros and Cons of the Options
 
