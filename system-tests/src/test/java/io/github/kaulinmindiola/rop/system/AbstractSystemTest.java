@@ -116,7 +116,12 @@ public abstract class AbstractSystemTest {
         docker().unpauseContainerCmd(containerIdOf(service)).exec();
     }
 
-    protected static void restart(String service) {
-        docker().restartContainerCmd(containerIdOf(service)).exec();
+    /**
+     * Restarts a service with no grace period ({@code docker restart -t 0}): the process gets
+     * SIGKILL immediately, as in a real crash. Nothing is shut down cleanly: open transactions are
+     * rolled back by the database and uncommitted offsets are redelivered by Kafka.
+     */
+    protected static void crashAndRestart(String service) {
+        docker().restartContainerCmd(containerIdOf(service)).withTimeout(0).exec();
     }
 }
