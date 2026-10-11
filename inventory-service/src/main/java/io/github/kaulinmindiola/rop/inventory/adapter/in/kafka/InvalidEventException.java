@@ -1,8 +1,8 @@
 package io.github.kaulinmindiola.rop.inventory.adapter.in.kafka;
 
 /**
- * A message that violates its event contract (AI-CONTEXT §6.2). Deterministic, so it is never
- * retried: it goes straight to the dead letter topic (ADR-0004, REQ-REL-001).
+ * A message that violates its event contract. Deterministic, so it is never retried: it goes
+ * straight to the dead letter topic (ADR-0004, REQ-REL-001).
  */
 public class InvalidEventException extends RuntimeException {
 
