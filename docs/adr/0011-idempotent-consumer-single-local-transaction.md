@@ -65,6 +65,12 @@ Verified by [`DuplicateDeliveryIT`](../../inventory-service/src/test/java/io/git
 (a rejection commits with its claim) and [`ProcessedEventRepositoryIT`](../../inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/out/persistence/ProcessedEventRepositoryIT.java)
 (a concurrent claim waits for the first transaction and is then a duplicate).
 
+On the order side, [`ApplyInventoryOutcomeAtomicityIT`](../../order-service/src/test/java/io/github/kaulinmindiola/rop/order/application/ApplyInventoryOutcomeAtomicityIT.java)
+shows that a failed transition rolls back its claim so the redelivery is applied, and
+[`InvalidTransitionIT`](../../order-service/src/test/java/io/github/kaulinmindiola/rop/order/adapter/in/kafka/InvalidTransitionIT.java)
+shows that duplicates, unknown orders and invalid transitions are recorded no-ops that never reach
+the dead letter topic.
+
 ## Pros and Cons of the Options
 
 ### Single local transaction with insert-based claim
