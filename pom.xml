@@ -117,4 +117,13 @@
             </plugin>
         </plugins>
     </build>
+    <profiles>
+        <!-- Black-box tests against the real Docker Compose stack (DI-11). -->
+        <profile>
+            <id>system-tests</id>
+            <modules>
+                <module>system-tests</module>
+            </modules>
+        </profile>
+    </profiles>
 </project>
