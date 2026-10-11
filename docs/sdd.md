@@ -155,7 +155,7 @@ The 15 viewpoints in the `sdd-template.md` catalog were evaluated. Twelve were s
     - `auto.offset.reset = earliest`: Asegura que si el consumer group no posee un offset previo registrado, la lectura inicie desde el principio de las particiones disponibles.
     - `AckMode.RECORD`: El reconocimiento (acknowledgement) del offset se realiza de forma individual por cada registro procesado de manera exitosa tras completarse la transacción local de base de datos.
 - **Control explícito del ciclo de vida en Tests de Integración (IT):** Los listeners se inician y detienen explícitamente mediante `KafkaListenerEndpointRegistry` en los métodos `@BeforeEach` y `@AfterEach` de las clases base de pruebas (como `AbstractListenerIT`). Esto garantiza que solo un consumer del grupo permanezca activo a la vez, evitando conflictos de concurrencia cuando Spring mantiene múltiples contextos de pruebas en caché.
-- 
+
 ### 3.1 Context
 
 ```markdown
@@ -871,17 +871,31 @@ The following 10 decisions were detailed and accepted in `MADR.md`. This section
 
 ### Appendix A â€” Environment Variables Reference
 
-| Variable | Service(s) | Description |
-|---|---|---|
-| `DB_URL` | order-service, inventory-service | JDBC URL to the shared PostgreSQL instance |
-| `DB_SCHEMA` | order-service, inventory-service | Own schema (`order_service` / `inventory_service`, ADR-0002) |
-| `DB_USER` / `DB_PASSWORD` | order-service, inventory-service | Credentials of the DB role scoped to its schema |
-| `KAFKA_BOOTSTRAP_SERVERS` | order-service, inventory-service | Kafka broker address |
-| `JWT_SIGNING_SECRET` | order-service | HS256 secret (REQ-SEC-001, ADR-0005) |
-| `OUTBOX_POLLING_INTERVAL_MS` | order-service | Outbox Publisher interval, default 5000 (REQ-FUNC-010) |
-| `SEED_CLIENT_ID` / `SEED_CLIENT_SECRET` | order-service | Client credentials seeded via Flyway migration (ADR-0009) |
+Every setting comes from environment variables (REQ-INST-001) and none is hardcoded in the repository
+(REQ-SEC-001). Docker Compose reads the variables you set from `.env` (copied from `.env.example`) and
+refuses to start if a required one is missing.
 
-All externalized via Docker Compose environment variables, none hardcoded in the repository (REQ-SEC-001, REQ-INST-001).
+**Variables you set**
+
+| Variable | Used by | Required | Purpose |
+|---|---|---|---|
+| `POSTGRES_PASSWORD` | postgres | yes | Superuser password, used only by the init script that creates the service roles (ADR-0015) |
+| `ORDER_DB_PASSWORD` | postgres, order-service | yes | Password of the `order_svc` role (ADR-0002) |
+| `INVENTORY_DB_PASSWORD` | postgres, inventory-service | yes | Password of the `inventory_svc` role (ADR-0002) |
+| `SEED_CLIENT_ID` | order-service | yes | API client seeded at startup by a Java Flyway migration registered as a Spring bean (ADR-0009) |
+| `SEED_CLIENT_SECRET` | order-service | yes | Its secret; only the BCrypt hash is stored (REQ-SEC-001) |
+| `JWT_SIGNING_SECRET` | order-service | yes | HS256 signing key, at least 32 bytes, validated at startup (REQ-SEC-001, ADR-0005) |
+| `OUTBOX_POLLING_INTERVAL_MS` | order-service, inventory-service | no (5000) | Interval of the outbox publisher (REQ-FUNC-010) |
+
+**Variables set by `docker-compose.yml`** (no configuration needed)
+
+| Variable | Used by | Value |
+|---|---|---|
+| `DB_URL` | both services | `jdbc:postgresql://postgres:5432/rop`; identical for both, the schema comes from each role's `search_path` |
+| `DB_SCHEMA` | both services | `order_service` / `inventory_service`; default schema of Flyway (ADR-0002) |
+| `DB_USER` | both services | `order_svc` / `inventory_svc` |
+| `DB_PASSWORD` | both services | Taken from `ORDER_DB_PASSWORD` / `INVENTORY_DB_PASSWORD` |
+| `KAFKA_BOOTSTRAP_SERVERS` | both services | `kafka:9092` (internal listener) |
 
 ### Appendix B â€” Traceability Matrix (SRS â†’ Design View â†’ ADR)
 
