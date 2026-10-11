@@ -4,13 +4,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.Frame;
 import io.github.kaulinmindiola.rop.system.support.SystemApi;
 import io.github.kaulinmindiola.rop.system.support.SystemDatabase;
 import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.ComposeContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -123,5 +127,28 @@ public abstract class AbstractSystemTest {
      */
     protected static void crashAndRestart(String service) {
         docker().restartContainerCmd(containerIdOf(service)).withTimeout(0).exec();
+    }
+
+    /** Everything a service has written to stdout and stderr, as an operator would read it. */
+    protected static String logsOf(String service) {
+        StringBuffer logs = new StringBuffer();
+        try {
+            docker().logContainerCmd(containerIdOf(service))
+                    .withStdOut(true)
+                    .withStdErr(true)
+                    .exec(
+                            new ResultCallback.Adapter<Frame>() {
+                                @Override
+                                public void onNext(Frame frame) {
+                                    logs.append(
+                                            new String(frame.getPayload(), StandardCharsets.UTF_8));
+                                }
+                            })
+                    .awaitCompletion(30, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while reading logs of " + service, e);
+        }
+        return logs.toString();
     }
 }
