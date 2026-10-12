@@ -259,6 +259,7 @@ docs/                requirements, design, ADRs, event contracts, request collec
 - [Architecture decision records](docs/adr)
 - [Event contracts](docs/events.md)
 - [Request collection](docs/requests.http)
+- [Demo guide](docs/demo.md): a five-minute tour of the failure scenarios
 
 ## Tech stack
 
