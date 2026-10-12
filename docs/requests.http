@@ -1,46 +1,183 @@
-### Obtain an access token (REQ-FUNC-007) - not OAuth2, see ADR-0005
-POST http://localhost:8080/auth/token
+# Resilient Order Pipeline — request collection for IntelliJ's HTTP client.
+#
+# 1. Start the stack: docker compose up --build -d
+# 2. Run this file from the top ("Run All Requests"). Synchronous responses are asserted.
+# 3. Wait about 15 seconds and run the requests under "Check outcomes": the pipeline is asynchronous.
+#
+# The SKU-002 pair expects a freshly started stack (stock 1): docker compose down -v, then up again.
+
+@host = http://localhost:8080
+
+### Obtain an access token (REQ-FUNC-007) — a minimal credential exchange, not OAuth2 (ADR-0005)
+POST {{host}}/auth/token
 Content-Type: application/json
 
 { "clientId": "demo-client", "clientSecret": "demo-secret-change-me" }
 
-> {% client.global.set("token", response.body.accessToken); %}
+> {%
+    client.test("token issued", function () {
+        client.assert(response.status === 200, "expected 200, got " + response.status);
+        client.assert(response.body.tokenType === "Bearer", "expected a Bearer token");
+    });
+    client.global.set("token", response.body.accessToken);
+%}
 
-### Create an order (REQ-FUNC-005)
-POST http://localhost:8080/api/v1/orders
+### 401 — wrong secret, same answer as an unknown client (REQ-FUNC-007)
+POST {{host}}/auth/token
+Content-Type: application/json
+
+{ "clientId": "demo-client", "clientSecret": "wrong-secret" }
+
+> {%
+    client.test("credentials rejected", function () {
+        client.assert(response.status === 401, "expected 401, got " + response.status);
+    });
+%}
+
+### SKU-001 (stock 1000) — will be CONFIRMED (REQ-FUNC-005, REQ-FUNC-014)
+POST {{host}}/api/v1/orders
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
-{
-    "items": [
-        { "productId": "SKU-001", "quantity": 3 },
-        { "productId": "SKU-003", "quantity": 2 }
-    ]
-}
+{ "items": [ { "productId": "SKU-001", "quantity": 2 } ] }
 
-> {% client.global.set("orderLocation", response.headers.valueOf("Location")); %}
+> {%
+    client.test("order accepted", function () {
+        client.assert(response.status === 201, "expected 201, got " + response.status);
+        client.assert(response.body.status === "PENDING", "a new order starts PENDING");
+    });
+    client.global.set("confirmedOrder", response.headers.valueOf("Location"));
+%}
 
-### Read the order back (REQ-FUNC-006)
-GET http://localhost:8080{{orderLocation}}
-Authorization: Bearer {{token}}
-
-### 401 - no token (BR-012)
-GET http://localhost:8080{{orderLocation}}
-
-### 400 - quantity must be positive (REQ-FUNC-002)
-POST http://localhost:8080/api/v1/orders
+### SKU-002 (stock 1), first order — will be CONFIRMED and take the last unit
+POST {{host}}/api/v1/orders
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
-{ "items": [ { "productId": "SKU-001", "quantity": 0 } ] }
+{ "items": [ { "productId": "SKU-002", "quantity": 1 } ] }
 
-### 422 - product not in the catalog (ADR-0014)
-POST http://localhost:8080/api/v1/orders
+> {%
+    client.test("order accepted", function () {
+        client.assert(response.status === 201, "expected 201, got " + response.status);
+    });
+    client.global.set("lastUnitOrder", response.headers.valueOf("Location"));
+%}
+
+### SKU-002, second order — will be REJECTED: no stock left (REQ-FUNC-013)
+POST {{host}}/api/v1/orders
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "items": [ { "productId": "SKU-002", "quantity": 1 } ] }
+
+> {%
+    client.test("order accepted", function () {
+        client.assert(response.status === 201, "expected 201, got " + response.status);
+    });
+    client.global.set("noStockLeftOrder", response.headers.valueOf("Location"));
+%}
+
+### SKU-003 (stock 0) — will be REJECTED: insufficient stock (REQ-FUNC-013, REQ-FUNC-015)
+POST {{host}}/api/v1/orders
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "items": [ { "productId": "SKU-003", "quantity": 1 } ] }
+
+> {%
+    client.test("order accepted", function () {
+        client.assert(response.status === 201, "expected 201, got " + response.status);
+    });
+    client.global.set("insufficientStockOrder", response.headers.valueOf("Location"));
+%}
+
+### SKU-004 (in the catalog, no stock row) — will be REJECTED: unknown product in inventory
+POST {{host}}/api/v1/orders
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "items": [ { "productId": "SKU-004", "quantity": 1 } ] }
+
+> {%
+    client.test("order accepted", function () {
+        client.assert(response.status === 201, "expected 201, got " + response.status);
+    });
+    client.global.set("unknownProductOrder", response.headers.valueOf("Location"));
+%}
+
+### 422 — product outside the catalog: refused upfront, never created (ADR-0014)
+POST {{host}}/api/v1/orders
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
 { "items": [ { "productId": "SKU-999", "quantity": 1 } ] }
 
-### 404 - unknown order
-GET http://localhost:8080/api/v1/orders/00000000-0000-0000-0000-000000000000
+> {%
+    client.test("unprocessable", function () {
+        client.assert(response.status === 422, "expected 422, got " + response.status);
+    });
+%}
+
+### 400 — quantity must be positive, with one entry per invalid field (REQ-FUNC-002)
+POST {{host}}/api/v1/orders
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "items": [ { "productId": "SKU-001", "quantity": 0 } ] }
+
+> {%
+    client.test("validation error", function () {
+        client.assert(response.status === 400, "expected 400, got " + response.status);
+        client.assert(response.body.errors[0].field === "items[0].quantity", "expected the invalid field");
+    });
+%}
+
+### 400 — an order id that is not a UUID
+GET {{host}}/api/v1/orders/not-a-uuid
+Authorization: Bearer {{token}}
+
+> {%
+    client.test("bad request", function () {
+        client.assert(response.status === 400, "expected 400, got " + response.status);
+    });
+%}
+
+### 401 — no token: deny by default (BR-012)
+GET {{host}}{{confirmedOrder}}
+
+> {%
+    client.test("unauthenticated", function () {
+        client.assert(response.status === 401, "expected 401, got " + response.status);
+        client.assert(response.headers.valueOf("WWW-Authenticate") === "Bearer", "expected WWW-Authenticate");
+    });
+%}
+
+### 404 — unknown order (REQ-FUNC-006)
+GET {{host}}/api/v1/orders/00000000-0000-0000-0000-000000000000
+Authorization: Bearer {{token}}
+
+> {%
+    client.test("not found", function () {
+        client.assert(response.status === 404, "expected 404, got " + response.status);
+    });
+%}
+
+### Check outcomes (1/5): SKU-001 → CONFIRMED. Run the five "Check" requests about 15 seconds after the orders above were created
+GET {{host}}{{confirmedOrder}}
+Authorization: Bearer {{token}}
+
+### Check outcomes (2/5): SKU-002 first order → CONFIRMED
+GET {{host}}{{lastUnitOrder}}
+Authorization: Bearer {{token}}
+
+### Check outcomes (3/5): SKU-002 second order → REJECTED
+GET {{host}}{{noStockLeftOrder}}
+Authorization: Bearer {{token}}
+
+### Check outcomes (4/5): SKU-003 → REJECTED
+GET {{host}}{{insufficientStockOrder}}
+Authorization: Bearer {{token}}
+
+### Check outcomes (5/5): SKU-004 → REJECTED
+GET {{host}}{{unknownProductOrder}}
 Authorization: Bearer {{token}}
