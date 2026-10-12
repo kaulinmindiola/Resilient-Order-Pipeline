@@ -1,180 +1,114 @@
-﻿# Software Design Description
-## For Event-Driven Order Platform
+﻿# Software Design Description — Resilient Order Pipeline
 
-Version 1
-Prepared by KM
-September 10, 2026
-
-## Table of Contents
-<!-- TOC -->
-* [1. Introduction](#1-introduction)
-    * [1.1 Document Purpose](#11-document-purpose)
-    * [1.2 Subject Scope](#12-subject-scope)
-    * [1.3 Definitions, Acronyms, and Abbreviations](#13-definitions-acronyms-and-abbreviations)
-    * [1.4 References](#14-references)
-    * [1.5 Document Overview](#15-document-overview)
-* [2. Design Overview](#2-design-overview)
-    * [2.1 Stakeholder Concerns](#21-stakeholder-concerns)
-    * [2.2 Selected Viewpoints](#22-selected-viewpoints)
-* [3. Design Views](#3-design-views)
-* [4. Decisions](#4-decisions)
-* [5. Appendixes](#5-appendixes)
-<!-- TOC -->
+Version 1.1 · Kaulin Mindiola
 
 ## Revision History
 
-| Name | Date | Reason For Changes | Version |
-|------|------|--------------------|---------|
-| Kaulin Mindiola | 2026-09-10 | Initial baseline, derived from SRS v1 and the 10 accepted decisions | 0.1 |
-| Kaulin Mindiola | 2026-10-04 | final version | 1 |
+| Name | Date | Reason for changes | Version |
+|---|---|---|---|
+| Kaulin Mindiola | 2026-09-10 | Initial baseline, derived from the SRS and the accepted decisions | 0.1 |
+| Kaulin Mindiola | 2026-10-04 | Design baseline before implementation | 1.0 |
+| Kaulin Mindiola | 2026-10-11 | Aligned with the implementation of v0.1.0 | 1.1 |
+
+## Table of Contents
+
+- [1. Introduction](#1-introduction)
+- [2. Design Overview](#2-design-overview)
+- [3. Design Views](#3-design-views)
+- [4. Decisions](#4-decisions)
+- [5. Security](#5-security)
+- [6. Appendixes](#6-appendixes)
 
 ## 1. Introduction
 
 ### 1.1 Document Purpose
 
-This SDD describes **how** the Event-Driven Order Platform v1 is designed to satisfy the requirements specified in `docs/srs.md`, translating the architectural decisions recorded individually in the `docs/adr/` directory (ADR-0001 through ADR-0018, all accepted) into a concrete structure of components, interfaces, data, and behavior. Its primary audience is the author â€” acting as implementer â€” and any technical portfolio reviewer evaluating the rigor of the design. The document contains enough detail to begin implementation without descending to the level of source code.
+This SDD describes **how** Resilient Order Pipeline v0.1.0 satisfies the requirements in
+[`srs.md`](srs.md): its components, interfaces, data, behaviour and deployment. It reflects the system
+as implemented. The rationale behind each significant choice lives in the architecture decision
+records under [`adr/`](adr/); this document references them rather than repeating them. Its audience is
+the author and any technical reviewer evaluating the design.
 
 ### 1.2 Subject Scope
 
-**Event-Driven Order Platform**, version v1, single release. The design fully covers the system defined in the SRS: two proprietary services (`order-service`, `inventory-service`) that collaborate asynchronously via Apache Kafka, with PostgreSQL as the shared source of truth (separate schemas per domain, ADR-0002), the Transactional Outbox pattern (ADR-0001), and idempotent consumers. It includes the design of: REST and event contracts, data model, JWT authentication, failure handling (Kafka down, retries, DLT), and deployment topology via Docker Compose. It explicitly excludes everything marked as Out-of-Scope in the SRS (UI, user management, external IdP, Kubernetes, CQRS/Event Sourcing, `notification-service`).
+Two services, `order-service` and `inventory-service`, collaborate asynchronously through Apache Kafka.
+PostgreSQL is the source of truth, with one schema and one owner role per service (ADR-0002, ADR-0015).
+Both services use the Transactional Outbox pattern (ADR-0001, ADR-0013) and idempotent consumers
+(ADR-0011). The design covers the REST and event contracts, the data model, authentication, failure
+handling (Kafka outage, duplicates, retries, dead letter topics) and the Docker Compose deployment.
+Everything listed as out of scope in the SRS is excluded.
 
-### 1.3 Definitions, Acronyms, and Abbreviations
+### 1.3 Definitions
 
 | Term | Definition |
-|------|------------|
-| Adapter | An infrastructure component that implements a domain Port (e.g., a JPA repository implementing `OrderRepository`). |
-| Aggregate | See SRS 1.3. |
-| Bounded Context | An explicit boundary within which a domain model (entities, rules) is valid and consistent; in this system, `order-service` and `inventory-service` are separate bounded contexts. |
-| Consumer Group | A logical grouping of instances of a Kafka consumer that share the partitions of a topic. |
-| DLT | See SRS 1.3 (Dead Letter Topic). |
-| Idempotent Consumer | See SRS 1.3. |
-| JWT | See SRS 1.3. |
-| KRaft | An operating mode of Apache Kafka that eliminates the Zookeeper dependency, using Kafka's own consensus protocol for metadata (see ADR-0007). |
-| MDC | Mapped Diagnostic Context â€” an SLF4J/Logback mechanism for propagating structured fields (e.g., `orderId`, `eventId`) across the logs of a single thread of execution. |
-| Outbox Pattern | See SRS 1.3. |
-| Partition Key | The value used by the Kafka producer to determine the destination partition of a message; in this system it is always `aggregateId` (ADR-0003). |
-| Port | An interface defined by the domain that abstracts an external dependency (persistence, messaging), implemented by an Adapter (see ADR-0006). |
+|---|---|
+| Adapter | Infrastructure component that implements a port or exposes the application (REST controller, Kafka listener, JDBC repository). |
+| Aggregate | See SRS 1.3. In this system, the order. |
+| At-least-once | Delivery guarantee: every event is delivered one or more times, never zero. |
+| Claim | Recording `(event_id, consumer)` in `processed_events` with `INSERT … ON CONFLICT DO NOTHING`; zero inserted rows means the event was already processed. |
+| Consumer group | Kafka consumers sharing the partitions of a topic: `order-service` and `inventory-service`. |
+| DLT | Dead letter topic, `<topic>.DLT`. |
+| KRaft | Kafka operating mode without ZooKeeper (ADR-0007). |
+| MDC | Mapped Diagnostic Context: per-thread fields (`orderId`, `eventId`) added to every log line. |
+| Outbox | Table where an outgoing event is stored in the same transaction as the state change that produced it. |
+| Partition key | Value that selects the Kafka partition; always the order id (`aggregateId`, ADR-0003). |
+| Port | Interface defined by the domain for an external dependency (ADR-0006). |
+| ProblemDetail | RFC 9457 error body. |
+| Savepoint | Point inside a transaction that can be rolled back to without aborting the transaction. |
 
 ### 1.4 References
 
-| Title | Owner | Version | Location | Type |
-|---|---|---|---|---|
-| SRS â€” Event-Driven Order Platform | Kaulin Mindiola | 1 | `docs/srs.md` | Normative |
-| ADR â€” Event-Driven Order Platform | Kaulin Mindiola | ADR-0001..018 | `docs/adr/` | Normative (decisions implemented by this design) |
-| RFC 7807 â€” Problem Details for HTTP APIs | IETF | RFC 7807 | https://www.rfc-editor.org/rfc/rfc7807 | Normative (error format) |
-
-### 1.5 Document Overview
-
-Section 2 (Design Overview) identifies stakeholder concerns and selects, with justification, the viewpoints from the `sdd-template.md` catalog that actually add value to this system. Section 3 (Design Views) contains the concrete views â€” diagrams and descriptions â€” organized by viewpoint, each referencing the SRS REQ-* requirements it implements. Section 4 (Decisions) summarizes the 10 accepted decisions, deferring to `MADR.md` as the detailed source without duplicating its content. Section 5 (Appendixes) contains non-normative supporting material: an environment variable reference and a traceability matrix.
+| Title | Location | Type |
+|---|---|---|
+| Software Requirements Specification | [`srs.md`](srs.md) | Normative |
+| Architecture Decision Records ADR-0001..0018 | [`adr/`](adr/) | Normative |
+| Event contracts | [`events.md`](events.md) | Normative |
+| RFC 9457 — Problem Details for HTTP APIs | https://www.rfc-editor.org/rfc/rfc9457 | Normative (error format) |
 
 ## 2. Design Overview
 
-This system is an event-driven reference backend, with two services collaborating asynchronously under eventual consistency. The design approach prioritizes: (a) demonstrating the patterns required by the SRS (Outbox, Idempotent Consumer) in a verifiable way; (b) keeping the domain isolated from messaging technology (ADR-0006); and (c) avoiding complexity not justified by the portfolio scope (no CQRS, no Event Sourcing, no external observability infrastructure).
+An event-driven reference backend in which two services reach a consistent outcome without distributed
+transactions. The design prioritises: (a) making the reliability patterns verifiable by tests;
+(b) keeping the domain independent of messaging and persistence technology (ADR-0006); and
+(c) avoiding complexity the scope does not justify (no CQRS, no event sourcing, no saga framework, no
+schema registry).
 
 ### 2.1 Stakeholder Concerns
 
-| Stakeholder | Concern | Addressed by (viewpoint) |
+| Stakeholder | Concern | Viewpoints |
 |---|---|---|
-| Developer/Implementer (the author) | Understand the structure well enough to implement it directly | Composition, Logical, Dependency, Interaction |
-| Technical portfolio reviewer | Evaluate engineering rigor and the coherence between decisions and design | Patterns, Section 4 (Decisions), ADR references |
-| API Client | Have stable input/output contracts | Interface |
-| Operator (the author, in local mode) | Be able to start and observe the system without friction | Deployment |
-| All of the above | Trust that eventual consistency and fault tolerance work as documented | Information, State Dynamics, Concurrency, Algorithm |
+| Implementer | Enough structure to implement and change the system safely | Composition, Logical, Dependency, Interaction |
+| Technical reviewer | Coherence between decisions, design and code | Patterns, Decisions, Verification |
+| API client | Stable request, response and error contracts | Interface |
+| Operator | Start, observe and recover the system | Deployment, Configuration |
+| All | Eventual consistency and fault tolerance work as documented | Information, State, Concurrency, Algorithm |
 
 ### 2.2 Selected Viewpoints
 
-The 15 viewpoints in the `sdd-template.md` catalog were evaluated. Twelve were selected because they address a real, verifiable concern in this system; the remaining 3 are marked `N/A` with their justification, to avoid producing views with no added value.
-
-#### 2.2.1 Context
-
-**Selected.** The system has a single external actor (API Client) and no third-party systems â€” it is worth fixing that boundary explicitly. See DV-001.
-
-#### 2.2.2 Composition
-
-**Selected.** There are 4 physical deployable pieces (order-service, inventory-service, PostgreSQL, Kafka) whose relationship is not trivial to infer from the SRS alone. See DV-002.
-
-#### 2.2.3 Logical
-
-**Selected.** ADR-0006 requires an explicit domain/infrastructure separation via ports; this view makes those ports tangible. See DV-003, DV-004.
-
-#### 2.2.4 Physical
-
-**N/A.** There is no complex hardware or network topology â€” everything runs in local Docker containers on a single machine; cloud infrastructure is explicitly out of scope (SRS, Out-of-Scope).
-
-#### 2.2.5 Structure
-
-**N/A.** No entity in this system has an internal composition (fine-grained ports/connectors) that is not already covered by Composition and Logical.
-
-#### 2.2.6 Dependency
-
-**Selected.** REQ-MAINT-001 is literally a dependency-direction requirement (the domain must not import Kafka); this view makes it explicit and verifiable. See DV-005.
-
-#### 2.2.7 Information
-
-**Selected.** The data model (orders, order_items, outbox_events, processed_events, stock) is central to BR-009/BR-010. See DV-006.
-
-#### 2.2.8 Interface
-
-**Selected.** REQ-MAINT-002 requires documented event contracts; in addition, the REST contracts must be fully specified for the API Client. See DV-007, DV-008.
-
-#### 2.2.9 Interaction
-
-**Selected.** It is the heart of an event-driven system: both the happy path and the failure paths (Kafka down, duplicates, DLT) must be shown. See DV-009 through DV-012 and DV-019.
-
-#### 2.2.10 Algorithm
-
-**Selected.** Two algorithms are critical to the correctness of the system and non-trivial: idempotent deduplication and atomic stock reservation. See DV-013, DV-014.
-
-#### 2.2.11 State Dynamics
-
-**Selected.** The order lifecycle (PENDING/CONFIRMED/REJECTED) is an explicit business requirement (BR-003 through BR-005, BR-011). See DV-015.
-
-#### 2.2.12 Concurrency
-
-**Selected.** ADR-0001 (single publisher instance) and ADR-0010 (atomic UPDATE) are concurrency guarantees that deserve to be made explicit, not merely implicit in the code. See DV-016.
-
-#### 2.2.13 Patterns
-
-**Selected.** One of the project's explicit goals (Master Context, Goals) is to demonstrate specific patterns; this view enumerates and references them. See DV-017.
-
-#### 2.2.14 Deployment
-
-**Selected.** REQ-INST-001 requires a reproducible environment with a single command; this view documents the container topology. See DV-018.
-
-#### 2.2.15 Resources
-
-**N/A.** There are no shared-resource constraints relevant to this scope (no production SLA, single instance of each service, no contention documented in the SRS). If connection pooling to be tuned by load were introduced in the future, this decision would be revisited.
+| Viewpoint | Selected | Reason |
+|---|---|---|
+| Context, Composition, Logical, Dependency | Yes | One external actor, four deployables, ports and adapters, a dependency rule enforced by a test |
+| Information, Interface | Yes | Data ownership per schema; REST and event contracts |
+| Interaction, Algorithm, State Dynamics, Concurrency | Yes | The core of an event-driven system: flows, failure paths, idempotency, atomic reservation |
+| Patterns, Deployment | Yes | The patterns are the project's purpose; a single-command environment is a requirement |
+| Physical, Structure, Resources | No | Single-machine Docker deployment; no internal structure beyond Composition and Logical; no resource contention in scope |
 
 ## 3. Design Views
 
-### Diseño del Consumer de `inventory-service`
-
-- **Parser de entrada y separación de mappers:** El servicio implementa un parser dedicado para la entrada (`OrderCreatedEventParser`), totalmente desacoplado del mapper de eventos salientes de outbox. Cualquier estructura inválida o violación de contrato en el mensaje recibido se traduce a `InvalidEventException`, clasificada como no reintentable.
-- **Resolutor explícito del DLT:** Se utiliza un `DeadLetterPublishingRecoverer` configurado para enrutar los mensajes venenosos (poison messages) o aquellos que agoten la política de reintentos hacia el tópico de destino `<topic>.DLT`, manteniendo estrictamente el mismo número de partición del registro original.
-- **Política de consumo (`AckMode.RECORD` y `auto-offset-reset: earliest`):**
-    - `auto.offset.reset = earliest`: Asegura que si el consumer group no posee un offset previo registrado, la lectura inicie desde el principio de las particiones disponibles.
-    - `AckMode.RECORD`: El reconocimiento (acknowledgement) del offset se realiza de forma individual por cada registro procesado de manera exitosa tras completarse la transacción local de base de datos.
-- **Control explícito del ciclo de vida en Tests de Integración (IT):** Los listeners se inician y detienen explícitamente mediante `KafkaListenerEndpointRegistry` en los métodos `@BeforeEach` y `@AfterEach` de las clases base de pruebas (como `AbstractListenerIT`). Esto garantiza que solo un consumer del grupo permanezca activo a la vez, evitando conflictos de concurrencia cuando Spring mantiene múltiples contextos de pruebas en caché.
-
 ### 3.1 Context
 
-```markdown
-- ID: DV-001
-- Title: System Context Diagram
-- Viewpoint: Context
-- Representation:
-```
+- **ID:** DV-001 · **Title:** System context · **Viewpoint:** Context
 
 ```mermaid
 graph TB
-    Client["API Client<br/>(script, Postman, test suite)"]
-    subgraph Platform["Event-Driven Order Platform"]
+    Client["API client<br/>(script, HTTP client, test suite)"]
+    subgraph System["Resilient Order Pipeline"]
         OS[order-service]
         IS[inventory-service]
         PG[(PostgreSQL)]
         KF[[Kafka]]
     end
-    Client -- "REST + JWT Bearer" --> OS
+    Client -- "REST + JWT" --> OS
     OS -- "OrderCreated" --> KF
     KF -- "OrderCreated" --> IS
     IS -- "InventoryReserved / InventoryRejected" --> KF
@@ -183,741 +117,618 @@ graph TB
     IS --- PG
 ```
 
-```markdown
-- More Information: Implements UC-01 through UC-08 of the SRS. There are no third-party external systems (self-issued authentication, no IdP). Source: SRS 2.1, 2.4.
-```
+The only external actor is the API client. There are no third-party systems: tokens are self-issued.
 
 ### 3.2 Composition
 
-```markdown
-- ID: DV-002
-- Title: Container Diagram (C4)
-- Viewpoint: Composition
-- Representation:
-```
+- **ID:** DV-002 · **Title:** Containers · **Viewpoint:** Composition
 
 ```mermaid
 graph TB
-    Client((API Client))
-    subgraph "order-service (Spring Boot 4 , :8080)"
-        OSApp[REST API + Outbox Publisher + JWT Issuer]
+    Client((API client))
+    subgraph OSC["order-service · Spring Boot 4.1 · :8080"]
+        OSApp["REST API · token issuance · outbox publisher<br/>inventory outcome consumer"]
     end
-    subgraph "inventory-service (Spring Boot 4)"
-        ISApp[Kafka Consumer + Reservation Logic]
+    subgraph ISC["inventory-service · Spring Boot 4.1 · no HTTP"]
+        ISApp["OrderCreated consumer · atomic reservation<br/>outbox publisher"]
     end
-    PG[("PostgreSQL 16<br/>schemas: order_service, inventory_service")]
-    KF[["Kafka (KRaft, :9092)<br/>topics: order.created, inventory.reserved, inventory.rejected + .DLT"]]
+    PG[("PostgreSQL 16<br/>schemas order_service, inventory_service")]
+    KF[["Kafka 4.2 · KRaft<br/>kafka:9092 internal · localhost:9094 host"]]
 
-    Client -->|HTTPS/HTTP + JWT| OSApp
-    OSApp -->|JDBC| PG
-    ISApp -->|JDBC| PG
-    OSApp -->|produce/consume| KF
-    ISApp -->|produce/consume| KF
+    Client -->|"HTTP + Bearer JWT"| OSApp
+    OSApp -->|"JDBC as order_svc"| PG
+    ISApp -->|"JDBC as inventory_svc"| PG
+    OSApp <-->|"produce / consume"| KF
+    ISApp <-->|"produce / consume"| KF
 ```
 
-```markdown
-- More Information: Each container implements REQ-INST-001 (Docker Compose). Full topology detail in DV-018. Related to ADR-0002 (separate schemas) and ADR-0007 (Kafka KRaft).
-```
+The services share no code (ADR-0016): the outbox publisher, the envelope mapper and the consumer
+failure policy are deliberately duplicated and kept identical apart from their package.
 
 ### 3.3 Logical
 
-```markdown
-- ID: DV-003
-- Title: Domain Ports â€” order-service
-- Viewpoint: Logical
-- Representation:
-```
+- **ID:** DV-003 · **Title:** Domain and ports — order-service · **Viewpoint:** Logical
 
 ```mermaid
 classDiagram
     class Order {
-        +OrderId id
+        +UUID id
         +OrderStatus status
         +List~OrderItem~ items
         +Money total
-        +confirm()
-        +reject()
+        +create(id, items, now)$ Order
+        +reconstitute(...)$ Order
+        +confirm(now) TransitionResult
+        +reject(now) TransitionResult
     }
     class OrderItem {
-        +ProductId productId
+        +String productId
         +int quantity
-        +Money unitPriceSnapshot
+        +Money unitPrice
+        +subtotal() Money
     }
-    class OrderStatus {
-        <<enumeration>>
-        PENDING
-        CONFIRMED
-        REJECTED
-    }
-    class OrderRepository {
-        <<interface>>
-        +findById(OrderId) Order
-        +save(Order) void
-    }
-    class OutboxEventRepository {
-        <<interface>>
-        +save(OutboxEvent) void
-        +findPending() List~OutboxEvent~
-        +markPublished(eventId) void
+    class TransitionResult {
+        <<sealed>>
+        Applied(from, to)
+        Ignored(current, requested)
     }
     class OutboxEvent {
         +UUID eventId
         +String eventType
         +String aggregateId
-        +String payload
+        +String topic
+        +Map payload
         +Instant occurredAt
-        +Instant publishedAt
     }
-    Order "1" --> "many" OrderItem
-    Order --> OrderStatus
-    OrderRepository ..> Order
-    OutboxEventRepository ..> OutboxEvent
+    class OrderRepository {
+        <<port>>
+        +save(Order)
+        +findById(UUID) Optional~Order~
+    }
+    class OutboxEventRepository {
+        <<port>>
+        +save(OutboxEvent)
+        +findPending(limit) List~OutboxEvent~
+        +markPublished(eventId, publishedAt)
+    }
+    class ProcessedEventRepository {
+        <<port>>
+        +claim(eventId, consumer, processedAt) boolean
+    }
+    class ProductCatalog {
+        <<port>>
+        +priceOf(productId) Optional~Money~
+    }
+    class ClientCredentialsRepository {
+        <<port>>
+        +findSecretHash(clientId) Optional~String~
+    }
+    Order "1" --> "1..*" OrderItem
+    Order ..> TransitionResult
 ```
 
-```markdown
-- More Information: Implements REQ-FUNC-003/004/005. `OutboxEventRepository` is consumed both by the application service (to persist within the same transaction, ADR-0001) and by the `OutboxPublisher` adapter (to read pending events). No type in this diagram depends on Kafka or JPA (ADR-0006). Unlike inventory-service (DV-004), the order-service domain does **not** define an `EventPublisher` port: it never publishes directly to Kafka, it only writes to `OutboxEventRepository` â€” the actual publishing happens entirely in the `OutboxPublisher` adapter (see DV-019).
-```
+`Order.create` is the only way to build a new order and enforces BR-001, BR-002, BR-003 and BR-018.
+`reconstitute` restores a persisted order without recalculating it. A transition on a terminal order
+returns `Ignored` instead of throwing (BR-014). The domain has **no** `EventPublisher` port: use cases
+only write to the outbox, and publishing is an adapter concern. Application services:
+`CreateOrderService`, `GetOrderService` and `ApplyInventoryOutcomeService`.
 
-```markdown
-- ID: DV-004
-- Title: Domain Ports â€” inventory-service
-- Viewpoint: Logical
-- Representation:
-```
+- **ID:** DV-004 · **Title:** Domain and ports — inventory-service · **Viewpoint:** Logical
 
 ```mermaid
 classDiagram
-    class Stock {
-        +ProductId productId
+    class ReservationRequest {
+        +UUID orderId
+        +List~ReservationItem~ items
+    }
+    class ReservationItem {
+        +String productId
         +int quantity
     }
+    class ReservationResult {
+        <<sealed>>
+        Reserved()
+        Rejected(reason)
+    }
+    class RejectionReason {
+        <<enumeration>>
+        INSUFFICIENT_STOCK
+        UNKNOWN_PRODUCT
+    }
     class StockRepository {
-        <<interface>>
-        +tryReserve(ProductId, int) boolean
+        <<port>>
+        +tryReserve(ReservationRequest) ReservationResult
+    }
+    class OutboxEventRepository {
+        <<port>>
     }
     class ProcessedEventRepository {
-        <<interface>>
-        +hasProcessed(eventId, consumer) boolean
-        +markProcessed(eventId, consumer) void
+        <<port>>
     }
-    class EventPublisher {
-        <<interface>>
-        +publishReserved(orderId) void
-        +publishRejected(orderId, reason) void
-    }
-    StockRepository ..> Stock
+    ReservationRequest "1" --> "1..*" ReservationItem
+    ReservationResult ..> RejectionReason
+    StockRepository ..> ReservationResult
 ```
 
-```markdown
-- More Information: `tryReserve` encapsulates the atomic conditional UPDATE of ADR-0010 (DV-014). `ProcessedEventRepository` implements the `processed_events` table of REQ-FUNC-016 (DV-013). `EventPublisher` is invoked by `InventoryReservationService` (application layer) after resolving the reservation, and implemented by a `KafkaEventPublisherAdapter` (see DV-005, DV-009, DV-011).
-```
+There is no stock entity in memory: a load-modify-save model is exactly what oversells under
+concurrency. The domain holds values and one port that promises atomicity; the database provides it
+(ADR-0010). A rejection is a result, never an exception. The outbox and processed-event ports are the
+same as in order-service (ADR-0016). Application service: `ReserveInventoryService`.
 
 ### 3.4 Dependency
 
-```markdown
-- ID: DV-005
-- Title: Allowed Import Directions (Package Dependency Graph)
-- Viewpoint: Dependency
-- Representation:
-```
+- **ID:** DV-005 · **Title:** Allowed dependency directions · **Viewpoint:** Dependency
 
 ```mermaid
 graph LR
-    subgraph domain["domain (pure)"]
-        D1["Order / Stock / OrderStatus"]
-        D2["Ports: OrderRepository, StockRepository,<br/>OutboxEventRepository, ProcessedEventRepository,<br/>EventPublisher"]
+    subgraph adapter
+        REST["in/rest · controllers, DTOs, error handler"]
+        LST["in/kafka · listeners, parsers, failure policy"]
+        PER["out/persistence · JPA (order aggregate), JdbcClient"]
+        PUB["out/kafka · outbox publisher, envelope mapper, topics"]
+        SEC["security · token issuance, resource server"]
     end
-    subgraph application["application"]
-        A1["OrderService / InventoryReservationService"]
+    subgraph application
+        UC["use cases (@Transactional)"]
     end
-    subgraph adapters["adapters (infrastructure)"]
-        AJ["JPA Adapters"]
-        AK["Kafka Adapters<br/>(Producer, Listener, OutboxPublisher,<br/>OutboxSchedulingConfiguration)"]
-        AR["REST Controllers"]
-        AS["Security/JWT Adapter"]
+    subgraph domain
+        MODEL["model + ports (plain Java)"]
     end
+    adapter --> application
+    adapter --> domain
     application --> domain
-    adapters --> domain
-    adapters --> application
 ```
 
-```markdown
-- More Information: Implements REQ-MAINT-001 / ADR-0006. Rule verifiable by inspection: no type in the `domain` package imports `org.apache.kafka.*`, `org.springframework.kafka.*`, or JPA annotations (`jakarta.persistence.*`). Arrows only point toward `domain`, never the other way around. The `EventPublisher` port exists only in the inventory-service domain (DV-004); order-service does not need it, since it never publishes directly to Kafka â€” it only writes to `OutboxEventRepository` (DV-003).
-```
+Dependencies point inwards only. `ArchitectureTest` in each service fails the build if `domain`
+imports Spring, `jakarta.persistence`, Kafka or Jackson, if `domain` depends on `application` or
+`adapter`, or if `application` depends on `adapter` (REQ-MAINT-001, ADR-0006).
 
 ### 3.5 Information
 
-```markdown
-- ID: DV-006
-- Title: Data Model (ERD)
-- Viewpoint: Information
-- Representation:
-```
+- **ID:** DV-006 · **Title:** Data model per schema · **Viewpoint:** Information
 
 ```mermaid
 erDiagram
-    ORDERS ||--o{ ORDER_ITEMS : contains
-    ORDERS ||--o{ OUTBOX_EVENTS : "emits (aggregate_id)"
+    ORDERS ||--|{ ORDER_ITEMS : contains
     ORDERS {
         uuid id PK
-        string status
-        decimal total
-        timestamp created_at
+        varchar status "PENDING | CONFIRMED | REJECTED (CHECK)"
+        numeric total "CHECK >= 0"
+        timestamptz created_at
+        timestamptz updated_at
     }
     ORDER_ITEMS {
-        uuid order_id FK
-        string product_id
-        int quantity
-        decimal unit_price_snapshot
+        uuid id PK
+        uuid order_id FK "indexed"
+        varchar product_id "no FK to products (BR-018)"
+        int quantity "CHECK > 0"
+        numeric unit_price_snapshot
+    }
+    PRODUCTS {
+        varchar product_id PK
+        numeric unit_price
+    }
+    CLIENT_CREDENTIALS {
+        varchar client_id PK
+        varchar client_secret_hash "BCrypt"
+        timestamptz created_at
     }
     OUTBOX_EVENTS {
         uuid event_id PK
-        string event_type
-        string aggregate_id
-        text payload
-        timestamp occurred_at
-        timestamp published_at
+        varchar event_type
+        varchar aggregate_id
+        varchar topic
+        jsonb payload
+        timestamptz occurred_at
+        timestamptz published_at "NULL = pending, partial index"
     }
     PROCESSED_EVENTS {
         uuid event_id PK
-        string consumer PK
-        timestamp processed_at
+        varchar consumer PK
+        timestamptz processed_at
     }
     STOCK {
-        string product_id PK
-        int quantity
+        varchar product_id PK
+        int quantity "available, CHECK >= 0"
     }
 ```
 
-```markdown
-- More Information: `ORDERS`, `ORDER_ITEMS`, `OUTBOX_EVENTS`, and one instance of `PROCESSED_EVENTS` (consumer = "order-service") live in the `order_service` schema. `STOCK` and another instance of `PROCESSED_EVENTS` (consumer = "inventory-service") live in the `inventory_service` schema (ADR-0002) â€” there is no single shared physical table; the pattern is repeated per service. Source: SRS Appendix B, BR-009.
-```
+- `order_service` schema: `orders`, `order_items`, `products`, `client_credentials`, `outbox_events`,
+  `processed_events`. Owner role `order_svc`.
+- `inventory_service` schema: `stock`, `outbox_events`, `processed_events`. Owner role `inventory_svc`.
+- Neither role has any privilege on the other schema or on `public`; each role's `search_path` is its
+  own schema (ADR-0002, ADR-0015).
+- `order_items.product_id` has no foreign key to `products` on purpose: the price is a snapshot and
+  must outlive catalog changes (BR-018).
+- Migrations (Flyway, run with the service role): order-service V1 technical tables, V2 business
+  tables, V3 product seed, V4 client credentials (a Java migration registered as a Spring bean, which
+  hashes the secret with BCrypt); inventory-service V1 technical tables, V2 stock, V3 stock seed.
 
 ### 3.6 Interface
 
-```markdown
-- ID: DV-007
-- Title: REST API Contract â€” order-service
-- Viewpoint: Interface
-- Representation:
-```
+- **ID:** DV-007 · **Title:** REST API — order-service · **Viewpoint:** Interface
 
-| Endpoint | Auth | Request | 2xx Response | Errors |
+| Endpoint | Auth | Request | Success | Errors |
 |---|---|---|---|---|
-| `POST /auth/token` | No | `{ "clientId": string, "clientSecret": string }` | `200 { "accessToken": string, "tokenType": "Bearer", "expiresIn": 1800 }` | `401` ProblemDetail |
-| `POST /api/v1/orders` | Bearer JWT | `{ "items": [{ "productId": string, "quantity": int }] }` | `201 { "orderId": uuid, "status": "PENDING" }` | `400` ProblemDetail + `errors[]`, `401` |
-| `GET /api/v1/orders/{id}` | Bearer JWT | â€” | `200 { "orderId": uuid, "status": string, "items": [...], "total": decimal }` | `404`, `401` |
+| `POST /auth/token` | none | `{ "clientId", "clientSecret" }` | `200 { "accessToken", "tokenType": "Bearer", "expiresIn": 1800 }` | `400`, `401` |
+| `POST /api/v1/orders` | Bearer | `{ "items": [{ "productId", "quantity" }] }` | `201 { "orderId", "status": "PENDING" }` + `Location` | `400` with `errors[]`, `401`, `422` |
+| `GET /api/v1/orders/{id}` | Bearer | — | `200 { "orderId", "status", "items", "total" }` | `400`, `401`, `404` |
 
-```markdown
-- More Information: Implements REQ-FUNC-001/002/005/006/007/008/009. RFC 7807 error format per SRS 3.1.3. Auth per ADR-0005.
-```
+Every error is an RFC 9457 `ProblemDetail`: `400` for malformed requests (Bean Validation, unreadable
+JSON, invalid id), `401` for missing or invalid credentials (with `WWW-Authenticate: Bearer`), `404`
+for unknown orders, `422` for products outside the catalog, and a generic `500` that never exposes
+internal details. Clients never send prices.
 
-```markdown
-- ID: DV-008
-- Title: Kafka Event Contracts
-- Viewpoint: Interface
-- Representation:
-```
+- **ID:** DV-008 · **Title:** Event contracts · **Viewpoint:** Interface
 
-**Topic `order.created`** (key = `aggregateId`, ADR-0003)
-```json
-{
-  "eventId": "uuid",
-  "eventType": "OrderCreated",
-  "occurredAt": "2026-09-10T12:00:00Z",
-  "aggregateId": "orderId-uuid",
-  "payload": {
-    "orderId": "uuid",
-    "items": [ { "productId": "string", "quantity": 0 } ]
-  }
-}
-```
+| Topic | Producer | Consumer group | Event |
+|---|---|---|---|
+| `order.created` | order-service | `inventory-service` | `OrderCreated { orderId, items[{ productId, quantity }] }` |
+| `inventory.reserved` | inventory-service | `order-service` | `InventoryReserved { orderId }` |
+| `inventory.rejected` | inventory-service | `order-service` | `InventoryRejected { orderId, reason }` |
+| `<topic>.DLT` | consumer error handlers | — (inspection) | the original record, unchanged |
 
-**Topic `inventory.reserved`** (key = `aggregateId`)
-```json
-{
-  "eventId": "uuid",
-  "eventType": "InventoryReserved",
-  "occurredAt": "2026-09-10T12:00:05Z",
-  "aggregateId": "orderId-uuid",
-  "payload": { "orderId": "uuid" }
-}
-```
-
-**Topic `inventory.rejected`** (key = `aggregateId`)
-```json
-{
-  "eventId": "uuid",
-  "eventType": "InventoryRejected",
-  "occurredAt": "2026-09-10T12:00:05Z",
-  "aggregateId": "orderId-uuid",
-  "payload": { "orderId": "uuid", "reason": "INSUFFICIENT_STOCK" }
-}
-```
-
-Dead Letter Topics: `order.created.DLT`, `inventory.reserved.DLT`, `inventory.rejected.DLT` (ADR-0004).
-
-```markdown
-- More Information: Implements REQ-MAINT-002. Common envelope per SRS 3.1.3. No Schema Registry (Out-of-Scope) â€” any payload change must be kept backward-compatible manually.
-```
+All events share the envelope `{ eventId, eventType, occurredAt, aggregateId, payload }`, are
+serialized as JSON strings, and are keyed by the order id. Delivery is at-least-once: consumers
+deduplicate by `eventId`. The full contracts, with examples taken from real messages, are in
+[`events.md`](events.md), which is their single source.
 
 ### 3.7 Interaction
 
-```markdown
-- ID: DV-009
-- Title: Happy Path â€” Order Creation to Confirmation
-- Viewpoint: Interaction
-- Representation:
-```
+- **ID:** DV-009 · **Title:** Happy path — creation to confirmation · **Viewpoint:** Interaction
 
 ```mermaid
 sequenceDiagram
-    participant C as API Client
+    autonumber
+    participant C as API client
     participant OS as order-service
-    participant DB as PostgreSQL (order_service)
-    participant KF as Kafka
+    participant ODB as order_service schema
+    participant K as Kafka
     participant IS as inventory-service
-    participant DBI as PostgreSQL (inventory_service)
+    participant IDB as inventory_service schema
 
-    C->>OS: POST /api/v1/orders
-    OS->>DB: INSERT order (PENDING) + INSERT outbox_event (OrderCreated) [1 tx]
-    OS-->>C: 201 {orderId, status: PENDING}
-    Note over OS: Outbox Publisher polls every 5s (ADR-0001)
-    OS->>KF: publish OrderCreated (key=orderId)
-    KF->>IS: deliver OrderCreated
-    IS->>DBI: tryReserve(stock) [conditional UPDATE, ADR-0010]
-    IS->>KF: publish InventoryReserved (key=orderId)
-    KF->>OS: deliver InventoryReserved
-    OS->>DB: markProcessed + UPDATE order SET status=CONFIRMED [1 tx]
+    C->>OS: POST /api/v1/orders (Bearer)
+    OS->>ODB: INSERT order PENDING + items + outbox OrderCreated (1 tx)
+    OS-->>C: 201 { orderId, PENDING }
+    Note over OS: outbox publisher, every 5 s (fixedDelay)
+    OS->>K: OrderCreated (key = orderId)
+    K-->>OS: ack
+    OS->>ODB: mark published
+    K->>IS: OrderCreated
+    IS->>IDB: claim + conditional UPDATEs + outbox InventoryReserved (1 tx)
+    Note over IS: offset committed after the database commit
+    IS->>K: InventoryReserved (key = orderId)
+    IS->>IDB: mark published
+    K->>OS: InventoryReserved
+    OS->>ODB: claim + order CONFIRMED (1 tx)
     C->>OS: GET /api/v1/orders/{id}
-    OS-->>C: 200 {status: CONFIRMED}
+    OS-->>C: 200 { status: CONFIRMED }
 ```
 
-```markdown
-- More Information: Implements UC-01, UC-02, UC-04, UC-05. References ADR-0001, ADR-0003, ADR-0010.
-```
+Neither service ever writes to the database and to Kafka in the same step: each state change and its
+outgoing event commit together, and publishing happens afterwards (ADR-0001, ADR-0013).
 
-```markdown
-- ID: DV-010
-- Title: Failure Path â€” Kafka Unavailable at Publish Time
-- Viewpoint: Interaction
-- Representation:
-```
+- **ID:** DV-010 · **Title:** Failure path — Kafka unavailable · **Viewpoint:** Interaction
 
 ```mermaid
 sequenceDiagram
+    autonumber
+    participant C as API client
     participant OS as order-service
-    participant DB as PostgreSQL
-    participant KF as Kafka
+    participant ODB as order_service schema
+    participant K as Kafka
 
-    Note over OS,KF: Kafka unavailable
-    OS->>DB: INSERT order + outbox_event [tx OK, order persisted]
-    loop every 5s (ADR-0001)
-        OS->>KF: publish attempt
-        KF--xOS: failure/timeout
-        Note over OS: event remains "pending", order is NOT lost
+    Note over K: broker down or not answering
+    C->>OS: POST /api/v1/orders
+    OS->>ODB: INSERT order + outbox event (1 tx)
+    OS-->>C: 201 — creating an order does not depend on Kafka
+    loop every cycle while Kafka is down
+        OS->>K: send oldest pending event
+        K--xOS: timeout (delivery.timeout.ms 10 s)
+        Note over OS: not marked, the batch stops to preserve order
     end
-    Note over KF: Kafka recovers
-    OS->>KF: publish OrderCreated (next cycle)
-    KF-->>OS: ack
-    OS->>DB: markPublished(eventId)
+    Note over K: broker back
+    OS->>K: send pending events
+    K-->>OS: ack
+    OS->>ODB: mark published
+    Note over OS,K: the pipeline completes with no manual action
 ```
 
-```markdown
-- More Information: Implements REQ-FUNC-011. Verifies the SRS NFR Reliability.
-```
+A timed-out send is ambiguous: the broker may still have written the record. The publisher, which did
+not mark it, sends it again, and the consumer absorbs the duplicate by its `eventId` (DV-011). Verified
+by `OutboxKafkaOutageIT` and, end to end, by `KafkaOutageSystemIT`.
 
-```markdown
-- ID: DV-011
-- Title: Failure Path â€” Duplicate Event Delivery (Idempotency)
-- Viewpoint: Interaction
-- Representation:
-```
+- **ID:** DV-011 · **Title:** Duplicate delivery · **Viewpoint:** Interaction
 
 ```mermaid
 sequenceDiagram
-    participant KF as Kafka
+    participant K as Kafka
     participant IS as inventory-service
-    participant DBI as PostgreSQL
+    participant IDB as inventory_service schema
 
-    KF->>IS: deliver OrderCreated (eventId=E1) [1st delivery]
-    IS->>DBI: hasProcessed(E1, "inventory-service")? NO
-    IS->>DBI: tryReserve(stock) + markProcessed(E1) [1 tx]
-    IS->>KF: publish InventoryReserved
-    KF->>IS: redeliver OrderCreated (eventId=E1) [duplicate]
-    IS->>DBI: hasProcessed(E1, "inventory-service")? YES
-    Note over IS: skip business effect, recorded no-op (BR-007)
+    K->>IS: OrderCreated (eventId E1)
+    IS->>IDB: claim(E1) → 1 row inserted
+    IS->>IDB: reserve + outbox (same tx), commit
+    K->>IS: OrderCreated (eventId E1) again
+    IS->>IDB: claim(E1) → 0 rows
+    Note over IS: duplicate: no effect, logged at INFO
 ```
 
-```markdown
-- More Information: Implements REQ-FUNC-016, UC-07. Algorithmic detail in DV-013.
-```
+A concurrent duplicate waits on the primary key of the first, uncommitted claim, then inserts nothing.
+The same mechanism protects order-service, where it also separates expected duplicates (INFO) from
+genuinely contradictory events (WARN).
 
-```markdown
-- ID: DV-012
-- Title: Failure Path â€” Consumer Retry Exhaustion to DLT
-- Viewpoint: Interaction
-- Representation:
-```
+- **ID:** DV-012 · **Title:** Retries and dead letter topic · **Viewpoint:** Interaction
 
 ```mermaid
 sequenceDiagram
-    participant KF as Kafka (order.created)
-    participant IS as inventory-service
-    participant DLT as order.created.DLT
+    participant K as Kafka (order.created)
+    participant L as listener + error handler
+    participant D as order.created.DLT
 
-    KF->>IS: deliver OrderCreated
-    IS--xIS: exception (attempt 1)
-    Note over IS: backoff 1s
-    KF->>IS: redeliver (attempt 2)
-    IS--xIS: exception (attempt 2)
-    Note over IS: backoff 2s
-    KF->>IS: redeliver (attempt 3)
-    IS--xIS: exception (attempt 3)
-    Note over IS: backoff 4s, limit reached
-    IS->>DLT: publish original message
-    Note over IS: continues processing subsequent messages
+    K->>L: record
+    L--xL: transient failure (attempt 1)
+    Note over L: wait 1 s, the partition is blocked
+    L--xL: attempt 2
+    Note over L: wait 2 s
+    L--xL: attempt 3
+    Note over L: wait 4 s
+    L--xL: attempt 4, retries exhausted
+    L->>D: original record, same partition
+    Note over L: offset committed, the next record is processed
+    K->>L: invalid record (InvalidEventException)
+    L->>D: sent immediately, no retries
 ```
 
-```markdown
-- More Information: Implements REQ-REL-001. References ADR-0004.
-```
+One delivery plus 3 retries with 1, 2 and 4 seconds of backoff (REQ-REL-001, ADR-0004). Retries block
+the partition for about 7 seconds per failing record, a deliberate trade-off. Messages that violate
+their contract are deterministic failures and go straight to the DLT.
 
-```markdown
-- ID: DV-019
-- Title: Outbox Publisher — Structure, Test Behavior, Producer Configuration and Delivery Semantics
-- Viewpoint: Interaction
-- Representation: Narrative description and tables (complements DV-009, DV-010, DV-016)
-```
+- **ID:** DV-019 · **Title:** Outbox publisher · **Viewpoint:** Interaction
 
-**1. Scheduling separated from the work.** The publisher is split into two classes with distinct responsibilities:
+| Class | Responsibility |
+|---|---|
+| `OutboxPublisher` | One cycle: read up to 100 pending events oldest first, send each with key = `aggregateId`, wait up to 15 s for the acknowledgement, then mark it published. The first failure ends the cycle and leaves the event pending. Holds no database transaction while waiting for Kafka. |
+| `OutboxSchedulingConfiguration` | Triggers a cycle with `fixedDelay` = `OUTBOX_POLLING_INTERVAL_MS` (default 5000), so slow cycles never overlap. Guarded by `outbox.publisher.scheduling-enabled`. |
 
-| Class | Responsibility | Knows about scheduling? |
+| Producer setting | Value | Purpose |
 |---|---|---|
-| `OutboxPublisher` | Does the work of one cycle: reads pending events through `OutboxEventRepository.findPending()`, sends each one to Kafka (key = `aggregateId`, ADR-0003), and calls `markPublished(eventId)` once the broker acknowledges it. Exposes a plain method that performs a single polling cycle. | No |
-| `OutboxSchedulingConfiguration` | Enables Spring scheduling and triggers `OutboxPublisher` every `OUTBOX_POLLING_INTERVAL_MS` (default 5000, ADR-0001). It contains no publishing logic. | Yes |
+| `acks` | `all` | The acknowledgement means the record is written |
+| idempotence | client default | Removes duplicates caused by the client's own internal retries |
+| `max.block.ms` | 5000 | Bounds the wait for metadata when the broker is unreachable |
+| `request.timeout.ms` | 5000 | Bounds a single broker request |
+| `delivery.timeout.ms` | 10000 | Bounds the whole send, including internal retries |
 
-Because `OutboxPublisher` has no scheduling annotations, a test can invoke a single cycle deterministically instead of waiting for a timer. The trigger can also be switched off without touching the publishing logic.
+Delivery is **at-least-once**. A duplicate, always with the same `eventId`, comes from one of two
+sources: the send succeeded but marking failed, or the send timed out ambiguously. Duplicates are
+absorbed by the consumer's claim (DV-011, ADR-0011).
 
-**2. Scheduling disabled in integration tests.** `OutboxSchedulingConfiguration` is not loaded in the integration test (IT) profile (it is guarded by a configuration property, e.g. `@ConditionalOnProperty`). The reason is the Spring test context cache: when different IT classes use different configurations, Spring keeps several application contexts alive at the same time within one test run. If each cached context started its own scheduler, there would be several `OutboxPublisher` instances polling the same `outbox_events` table concurrently. That breaks the single-publisher assumption of ADR-0001 (DV-016), which is deliberately not protected by `SELECT ... FOR UPDATE SKIP LOCKED`, and would produce duplicate publications and non-deterministic tests. With the trigger disabled, ITs call `OutboxPublisher` explicitly, so exactly one publisher acts at a time.
+- **ID:** DV-020 · **Title:** Consumers and failure policy · **Viewpoint:** Interaction
 
-**3. Producer configuration.** The producer is tuned so that a Kafka outage makes a cycle fail quickly and leave the event pending (DV-010), instead of blocking the scheduler thread.
+| Aspect | Design |
+|---|---|
+| Listeners | inventory-service: one listener on `order.created`. order-service: one listener (a single container) on `inventory.reserved` and `inventory.rejected`, which derives the expected outcome from the topic. |
+| Parsing | A dedicated inbound parser per service, separate from the outbound envelope mapper. Any contract violation (unreadable JSON, unexpected `eventType`, invalid ids, `aggregateId` different from `payload.orderId`, invalid items, unknown rejection reason) becomes a non-retryable `InvalidEventException`. Unknown fields are ignored for backward compatibility. |
+| Offsets | `enable.auto.commit=false`, `AckMode.RECORD`: the offset is committed after the listener returns, that is, after the database commit. A crash in between causes a redelivery, never a loss. |
+| New groups | `auto.offset.reset=earliest`, so events published before a consumer group first started are not skipped. |
+| Dead letters | `DeadLetterPublishingRecoverer` with an explicit destination: `<topic>.DLT`, same partition as the original record. |
+| Logs | The listener puts the record key (the order id) in the MDC before parsing, and the `eventId` after it, so even unparseable messages produce correlated logs. |
 
-| Property | Value | Purpose |
-|---|---|---|
-| `acks` | `all` | The send is acknowledged only after the in-sync replicas have the record; `markPublished` is never called on an unconfirmed write. |
-| `enable.idempotence` | `true` | Removes duplicates caused by the producer's own internal retries within one producer session. |
-| `max.block.ms` | `3000` | Upper bound on waiting for metadata or buffer space when Kafka is unreachable. |
-| `request.timeout.ms` | `2000` | Time to wait for a single broker response before the request is retried or failed. |
-| `delivery.timeout.ms` | `5000` | Total time budget for one send, including retries. Must be at least `request.timeout.ms` plus `linger.ms`. |
-| Wait on the send future | `5s` | `OutboxPublisher` waits synchronously for the acknowledgement up to this limit; on timeout or error it stops the cycle and leaves the event pending. |
-
-The key and value serializers are string-based, and `bootstrap.servers` comes from `KAFKA_BOOTSTRAP_SERVERS` (Appendix A). The timeouts are kept in the same order of magnitude as the polling interval so that a failing cycle does not overlap the next one.
-
-**4. Delivery semantics: at-least-once.** The publisher guarantees that every committed event is published **at least once**, never zero times, but it does not guarantee exactly once. The `markPublished` update in PostgreSQL and the send to Kafka cannot share a transaction (no 2PC, ADR-0001), so a duplicate can appear from two sources:
-
-| # | Source of duplicates | What happens | Result |
-|---|---|---|---|
-| 1 | **Acknowledgement lost or timed out** | The broker persisted the record, but the acknowledgement does not reach the publisher before the timeout. The publisher treats the send as failed and leaves the event pending. | The next cycle sends the same event again. |
-| 2 | **Failure after the acknowledgement, before `markPublished` commits** | Kafka confirmed the record, but the service crashes or the database update fails before the event is marked as published. | After recovery, the event is still pending and is sent again. |
-
-In both cases the republished message carries the **same `eventId`**. Duplicates are absorbed downstream by the Idempotent Consumer (`processed_events`, DV-011 and DV-013), so the business effect is applied only once. Idempotence on the producer (`enable.idempotence`) covers only the producer's internal retries and does not remove these two sources, which is why consumer-side deduplication remains mandatory.
-
-```markdown
-- More Information: Implements REQ-FUNC-010 / REQ-FUNC-011. References ADR-0001, ADR-0003, ADR-0006. Source 1 and source 2 correspond to the failure window shown in DV-010, and the consumer side of the guarantee to DV-011.
-```
+The failure policy and `InvalidEventException` are identical in both services (ADR-0016).
 
 ### 3.8 Algorithm
 
-```markdown
-- ID: DV-013
-- Title: Idempotent Event Processing Algorithm
-- Viewpoint: Algorithm
-- Representation:
-```
+- **ID:** DV-013 · **Title:** Idempotent event handling · **Viewpoint:** Algorithm
 
 ```text
-function handle(event):
-    if processedEventRepository.hasProcessed(event.eventId, CONSUMER_NAME):
-        log.info("duplicate event skipped", event.eventId)
-        return                              # no-op, BR-007
-
-    applyBusinessEffect(event)              # e.g., tryReserve or state transition
-    processedEventRepository.markProcessed(event.eventId, CONSUMER_NAME)
-    # both steps in the SAME local consumer transaction
+handle(event):                                             # one local transaction
+    if not processedEvents.claim(event.eventId, CONSUMER):  # INSERT … ON CONFLICT DO NOTHING
+        log INFO "duplicate"; return                        # 0 rows inserted: already processed
+    effect = applyBusinessEffect(event)                     # a no-op when the transition is invalid
+    if effect has an outgoing event:                        # inventory-service only
+        outbox.save(outgoingEvent)
+# the offset is committed after the commit (AckMode.RECORD)
 ```
 
-```markdown
-- More Information: Implements REQ-FUNC-016, BR-006/BR-007. The transactional coupling between `applyBusinessEffect` and `markProcessed` is critical: if they ran in separate transactions, a failure between them could leave the effect applied but unmarked (incorrect future reprocessing) or marked but not applied (lost effect).
-```
+The claim, the effect and the outgoing event commit together or not at all. If anything fails, the
+claim is rolled back as well, so the redelivered event is processed from scratch instead of being
+mistaken for a duplicate. Claiming first matters: claiming after the effect would let a redelivery
+apply it twice before discovering the duplicate.
 
-```markdown
-- ID: DV-014
-- Title: Atomic Stock Reservation Algorithm
-- Viewpoint: Algorithm
-- Representation:
-```
+- **ID:** DV-014 · **Title:** Atomic stock reservation · **Viewpoint:** Algorithm
 
 ```text
-function tryReserve(productId, quantity):
-    rowsAffected = execute(
-        "UPDATE stock SET quantity = quantity - :qty
-         WHERE product_id = :id AND quantity >= :qty",
-        qty=quantity, id=productId
-    )
-    return rowsAffected == 1        # true = reserved, false = insufficient stock
-
-function reserveForOrder(order):
-    for item in order.items:
-        if not tryReserve(item.productId, item.quantity):
-            rollbackTransaction()
-            return REJECTED         # atomic rejection of the whole order, no partial reservations
-    return RESERVED
+tryReserve(request):                       # inside the caller's transaction, never its own
+    savepoint = connection.setSavepoint()  # on the transaction's JDBC connection
+    for item in request.items sorted by productId:      # fixed lock order: no deadlocks
+        rows = UPDATE stock SET quantity = quantity - :qty
+               WHERE product_id = :id AND quantity >= :qty
+        if rows != 1:
+            connection.rollback(savepoint)  # undo this reservation's decrements only
+            reason = stock row exists ? INSUFFICIENT_STOCK : UNKNOWN_PRODUCT
+            return Rejected(reason)          # the transaction stays usable
+    release(savepoint)
+    return Reserved
 ```
 
-```markdown
-- More Information: Implements REQ-FUNC-012/013, ADR-0010. Atomicity is guaranteed by PostgreSQL in a single statement, with no explicit application-level locks.
-```
+The check and the decrement are a single statement, so the row lock serializes concurrent
+reservations and stock can never go negative; a `CHECK (quantity >= 0)` is a second barrier. The
+savepoint lets a rejection be committed together with its claim and its `InventoryRejected` event.
+It is taken on the connection of the current transaction (obtained through `DataSourceUtils`), so the
+adapter works whether the transaction was opened declaratively or programmatically (ADR-0010).
 
 ### 3.9 State Dynamics
 
-```markdown
-- ID: DV-015
-- Title: Order State Machine
-- Viewpoint: State Dynamics
-- Representation:
-```
+- **ID:** DV-015 · **Title:** Order state machine · **Viewpoint:** State Dynamics
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING: OrderCreated persisted (BR-003)
-    PENDING --> CONFIRMED: InventoryReserved consumed (BR-004)
-    PENDING --> REJECTED: InventoryRejected consumed (BR-005)
+    [*] --> PENDING: order created (BR-003)
+    PENDING --> CONFIRMED: InventoryReserved (BR-004)
+    PENDING --> REJECTED: InventoryRejected (BR-005)
     CONFIRMED --> [*]
     REJECTED --> [*]
 ```
 
-```markdown
-- More Information: BR-011 allows the order to remain temporarily in PENDING while the corresponding event has not yet been consumed (eventual consistency, SRS NFR Consistency).
-```
+| Situation | Handling | Effect |
+|---|---|---|
+| Valid transition | Applied and saved | Status and `updated_at` change |
+| Event on a terminal order | `Ignored`, logged at WARN | Nothing changes, `updated_at` included (BR-014, BR-017) |
+| Duplicate event | Claim fails, logged at INFO | Nothing changes |
+| Unknown order | Logged at WARN | The event is recorded as processed (REQ-FUNC-019) |
+
+None of these is an error, so none is retried or dead-lettered. An order may stay `PENDING` while its
+events are in flight (BR-011), or indefinitely if its event ends up in a DLT (a known limitation).
 
 ### 3.10 Concurrency
 
-```markdown
-- ID: DV-016
-- Title: Outbox Publisher Singleton & Stock Update Race Avoidance
-- Viewpoint: Concurrency
-- Representation: Narrative description (no additional diagram; complements DV-009/DV-014)
-```
+- **ID:** DV-016 · **Title:** Concurrency guarantees · **Viewpoint:** Concurrency
 
-order-service runs as a single instance (an assumption of ADR-0001): the Outbox Publisher's `@Scheduled` task never runs concurrently with itself, so `SELECT ... FOR UPDATE SKIP LOCKED` is not required in this version. inventory-service, on the other hand, may receive concurrent messages from different partitions; correctness under concurrent `OrderCreated` events for the same `productId` does not depend on an application-level lock, but on the fact that the conditional `UPDATE` of DV-014 is atomic at the PostgreSQL engine level â€” two concurrent transactions on the same row are serialized automatically by the engine. Additionally, the `DefaultErrorHandler` (ADR-0004) blocks the advancement of a partition during the backoff window of a failed message, guaranteeing that there are never two processing attempts of the same message running in parallel. The single-publisher assumption is also why scheduling is disabled in integration tests (see DV-019, section 2).
-
-```markdown
-- More Information: References ADR-0001, ADR-0004, ADR-0010. Publisher design details in DV-019.
-```
+- **One publisher per service.** Each service runs one instance and its scheduler never overlaps
+  itself (`fixedDelay`), so the outbox needs no row locking (ADR-0001). Running several instances
+  would require `FOR UPDATE SKIP LOCKED` or change data capture. For the same reason the publisher is
+  not scheduled in integration tests, where Spring keeps several test contexts alive at once: tests
+  invoke it explicitly.
+- **Stock.** Concurrent reservations of the same product are serialized by the row lock of the
+  conditional `UPDATE`; a fixed lock order prevents deadlocks (DV-014).
+- **Duplicates.** A concurrent duplicate claim waits for the first transaction and then inserts no
+  row (DV-011).
+- **Per-order ordering.** All events of an order share its key, hence a partition, and are processed
+  serially. During a backoff the partition is blocked, so no record is processed twice in parallel.
 
 ### 3.11 Patterns
 
-```markdown
-- ID: DV-017
-- Title: Applied Architectural & Design Patterns
-- Viewpoint: Patterns
-- Representation:
-```
+- **ID:** DV-017 · **Title:** Applied patterns · **Viewpoint:** Patterns
 
-| Pattern | Where it is applied | Decision |
+| Pattern | Where | Decision |
 |---|---|---|
-| Transactional Outbox | order-service (order + event persistence) | ADR-0001 |
-| Idempotent Consumer | order-service and inventory-service (`processed_events`) | REQ-FUNC-016, DV-013 |
-| Ports & Adapters (Lightweight Hexagonal) | Both services | ADR-0006 |
-| Dead Letter Channel | Kafka consumers of both services | ADR-0004 |
-| Conditional atomic update (concurrency without explicit locks) | inventory-service | ADR-0010 |
-
-```markdown
-- More Information: These patterns are the project's central engineering evidence (Master Context, Goals and Key Engineering Evidence).
-```
+| Transactional Outbox with polling publisher | Both services | ADR-0001, ADR-0013 |
+| Idempotent Consumer | Both consumers (`processed_events`) | ADR-0011 |
+| Dead Letter Channel | Both consumers | ADR-0004 |
+| Ports and Adapters (lightweight hexagonal) | Both services | ADR-0006 |
+| Conditional atomic update with savepoint | inventory-service | ADR-0010 |
+| Database-enforced data ownership | PostgreSQL roles and schemas | ADR-0002, ADR-0015 |
 
 ### 3.12 Deployment
 
-```markdown
-- ID: DV-018
-- Title: Docker Compose Deployment Topology
-- Viewpoint: Deployment
-- Representation:
-```
+- **ID:** DV-018 · **Title:** Docker Compose topology · **Viewpoint:** Deployment
 
 ```mermaid
 graph TB
-    subgraph "Docker Compose network"
-        OS["order-service<br/>:8080"]
+    subgraph net["Compose network"]
+        OS["order-service<br/>host :8080"]
         IS["inventory-service"]
-        PG[("postgres:16<br/>:5432")]
-        KF[["kafka (KRaft)<br/>:9092"]]
+        PG[("postgres:16<br/>host :5432<br/>init script: schemas and roles")]
+        KF[["apache/kafka:4.2.2 · KRaft<br/>kafka:9092 · host :9094"]]
     end
-    Client((API Client)) -->|"HTTP :8080"| OS
+    Client((API client)) -->|"HTTP :8080"| OS
     OS --> PG
     IS --> PG
     OS <--> KF
     IS <--> KF
 ```
 
-```markdown
-- More Information: KRaft mode, no Zookeeper container (ADR-0007). Environment variables externalized per REQ-INST-001 â€” see Appendix A. A single `docker-compose up` leaves everything operational (REQ-INST-001).
-```
+- A single `docker compose up --build` builds both images (multi-stage, so no JDK is needed on the
+  host) and starts all four containers (REQ-INST-001).
+- PostgreSQL and Kafka have healthchecks; the services start only when both are healthy and restart
+  on failure.
+- The services run as a non-root user.
+- Topics are declared by the services at startup; broker-side auto-creation is disabled (ADR-0012).
+- Logs are JSON on standard output, with `orderId` and `eventId` as fields (ADR-0008).
 
 ## 4. Decisions
 
-The following 10 decisions were detailed and accepted in `MADR.md`. This section summarizes each one; **the normative source is `MADR.md`**, and its full content is not duplicated here.
+The 18 decisions below are recorded in [`adr/`](adr/), each with its context, the options considered,
+the consequences accepted and the tests that confirm it. This section only indexes them.
 
-```markdown
-- ID: SDD-DEC-001
-- Title: Outbox publishing strategy
-- Context: Kafka does not participate in order-service's PostgreSQL transaction (no 2PC); pending events must be published reliably.
-- Options: Embedded Polling Publisher / Separate relay service / CDC (Debezium)
-- Outcome: Embedded Polling Publisher â€” see ADR-0001 in MADR.md
-- More Information: MADR.md â†’ ADR-0001
-```
-
-```markdown
-- ID: SDD-DEC-002
-- Title: Data ownership in a shared PostgreSQL instance
-- Context: Single mandatory instance, with schema separation per domain.
-- Options: Schema-level isolation / Shared schema / Separate instances
-- Outcome: Schema-level isolation with a dedicated DB role â€” see ADR-0002 in MADR.md
-- More Information: MADR.md â†’ ADR-0002
-```
-
-```markdown
-- ID: SDD-DEC-003
-- Title: Kafka event key/partition strategy
-- Context: Preserve per-aggregate ordering in the event of a future increase in partitions.
-- Options: Key=aggregateId / No key / Key=eventType
-- Outcome: Key=aggregateId â€” see ADR-0003 in MADR.md
-- More Information: MADR.md â†’ ADR-0003
-```
-
-```markdown
-- ID: SDD-DEC-004
-- Title: Consumer retry and Dead Letter Topic strategy
-- Context: REQ-REL-001 requires 3 retries with 1s/2s/4s backoff and then a DLT.
-- Options: DefaultErrorHandler+DLT recoverer / Manual retry / @RetryableTopic
-- Outcome: DefaultErrorHandler + DeadLetterPublishingRecoverer â€” see ADR-0004 in MADR.md
-- More Information: MADR.md â†’ ADR-0004
-```
-
-```markdown
-- ID: SDD-DEC-005
-- Title: JWT authentication and client credentials strategy
-- Context: Self-issued JWT, no external IdP, no user management.
-- Options: Spring Security Resource Server / Custom filter / Spring Authorization Server
-- Outcome: Spring Security Resource Server with a local JWT decoder â€” see ADR-0005 in MADR.md
-- More Information: MADR.md â†’ ADR-0005
-```
-
-```markdown
-- ID: SDD-DEC-006
-- Title: Domain/infrastructure separation (layering)
-- Context: REQ-MAINT-001 requires a domain with no dependency on Kafka.
-- Options: Lightweight Hexagonal / Simple layers / Full Clean Architecture
-- Outcome: Lightweight Hexagonal (Ports & Adapters) â€” see ADR-0006 in MADR.md
-- More Information: MADR.md â†’ ADR-0006
-```
-
-```markdown
-- ID: SDD-DEC-007
-- Title: Kafka deployment mode
-- Context: REQ-INST-001 requires single-command startup with minimal complexity.
-- Options: KRaft / Classic Kafka+Zookeeper
-- Outcome: KRaft (no Zookeeper) â€” see ADR-0007 in MADR.md
-- More Information: MADR.md â†’ ADR-0007
-```
-
-```markdown
-- ID: SDD-DEC-008
-- Title: Structured logging and correlation strategy
-- Context: REQ-OBS-001 requires orderId/eventId in all relevant logs.
-- Options: MDC + JSON logging / Manual plain text / External observability stack
-- Outcome: MDC + JSON logging (Logback encoder) â€” see ADR-0008 in MADR.md
-- More Information: MADR.md â†’ ADR-0008
-```
-
-```markdown
-- ID: SDD-DEC-009
-- Title: DB schema versioning and data seeding
-- Context: Full reproducibility required by REQ-INST-001, including seeded client credentials.
-- Options: Flyway / Liquibase / ddl-auto + CommandLineRunner
-- Outcome: Flyway with a seed migration â€” see ADR-0009 in MADR.md
-- More Information: MADR.md â†’ ADR-0009
-```
-
-```markdown
-- ID: SDD-DEC-010
-- Title: Stock concurrency control in inventory-service
-- Context: Avoid overselling under concurrent orders for the same product.
-- Options: Atomic conditional UPDATE / Optimistic locking / Pessimistic locking
-- Outcome: Atomic conditional UPDATE â€” see ADR-0010 in MADR.md
-- More Information: MADR.md â†’ ADR-0010
-```
+| ADR | Decision |
+|---|---|
+| 0001 | Outbox published by an embedded polling publisher: ack, then mark; at-least-once |
+| 0002 | One schema and one role per service in a single PostgreSQL instance |
+| 0003 | Partition key = aggregate id (the order id) |
+| 0004 | `DefaultErrorHandler` with 1/2/4 s backoff, then a DLT; invalid messages are not retried; string values |
+| 0005 | Self-issued HS256 tokens (`NimbusJwtEncoder`), validated by the Spring Security resource server |
+| 0006 | Lightweight hexagonal architecture |
+| 0007 | Kafka in KRaft mode, one node |
+| 0008 | Spring Boot structured logging (JSON) with MDC |
+| 0009 | Flyway migrations per service; seeds as migrations |
+| 0010 | Stock reserved with a conditional `UPDATE` in a fixed order; rejection rolls back to a savepoint |
+| 0011 | Claim, effect and outbox in one local transaction; offset committed afterwards |
+| 0012 | 3 partitions, replication factor 1, topics declared at startup |
+| 0013 | An outbox in inventory-service too |
+| 0014 | A read-only product catalog; clients never send prices |
+| 0015 | Each role owns its schema; Flyway runs with that role |
+| 0016 | Independent services without a shared module; deliberate, verified duplication |
+| 0017 | Java 21, Spring Boot 4.1, Kafka 4.x |
+| 0018 | JPA only for the order aggregate; `JdbcClient` for technical tables and stock |
 
 ## 5. Security
 
-### Architectural Security Decisions
-
-- **Zero Clock Skew Tolerance:** JWT validation is configured with zero seconds of clock skew tolerance. Since the token is self-issued and validated within the same internal infrastructure, there is no network delay or external clock synchronization drift to account for, making any tolerance window an unnecessary risk.
-- **Dummy Hash Calculation:** To prevent client enumeration via timing attacks, the authentication process executes a dummy hash computation when an unknown client or user is queried. This ensures that the response times for both valid and invalid clients remain indistinguishable.
-- **Deny-by-Default Policy:** The resource server enforces a strict deny-by-default access control policy (`anyRequest().authenticated()`). Only a single public endpoint (the token issuance point) is explicitly whitelisted, safely minimizing the exposed attack surface.
+- **Authentication.** `POST /auth/token` exchanges client credentials for an HS256 token valid for
+  30 minutes. It is not OAuth2. Secrets are stored only as BCrypt hashes.
+- **No client enumeration.** An unknown client and a wrong secret receive byte-identical `401`
+  responses, and an unknown client is checked against a dummy hash so both paths take the same time.
+- **Validation without clock skew.** The issuer and the validator are the same process, so an expired
+  token is rejected as soon as it expires.
+- **Deny by default.** Every request requires a valid token except `POST /auth/token` (and error
+  forwards). Authentication failures return a `ProblemDetail` with `WWW-Authenticate: Bearer` and never
+  reveal the reason.
+- **Stateless.** No session and no cookies; CSRF protection is therefore unnecessary and disabled.
+- **Secrets.** All secrets come from environment variables; the signing key is validated at startup
+  (at least 32 bytes) and error messages name variables, never values. No token, secret or password
+  is ever logged, which a system test verifies on the real container output.
+- **Data access.** Each service connects with a role limited to its own schema; neither connects as a
+  superuser.
+- **Containers.** The services run as a non-root user.
+- **Not in scope:** HTTPS, rate limiting, refresh tokens, key rotation.
 
 ## 6. Appendixes
 
-### Appendix A â€” Environment Variables Reference
+### Appendix A — Configuration
 
-Every setting comes from environment variables (REQ-INST-001) and none is hardcoded in the repository
-(REQ-SEC-001). Docker Compose reads the variables you set from `.env` (copied from `.env.example`) and
-refuses to start if a required one is missing.
-
-**Variables you set**
+Every setting comes from environment variables (REQ-INST-001). Docker Compose reads them from `.env`
+(copied from `.env.example`) and refuses to start if a required one is missing.
 
 | Variable | Used by | Required | Purpose |
 |---|---|---|---|
 | `POSTGRES_PASSWORD` | postgres | yes | Superuser password, used only by the init script that creates the service roles (ADR-0015) |
-| `ORDER_DB_PASSWORD` | postgres, order-service | yes | Password of the `order_svc` role (ADR-0002) |
-| `INVENTORY_DB_PASSWORD` | postgres, inventory-service | yes | Password of the `inventory_svc` role (ADR-0002) |
-| `SEED_CLIENT_ID` | order-service | yes | API client seeded at startup by a Java Flyway migration registered as a Spring bean (ADR-0009) |
-| `SEED_CLIENT_SECRET` | order-service | yes | Its secret; only the BCrypt hash is stored (REQ-SEC-001) |
-| `JWT_SIGNING_SECRET` | order-service | yes | HS256 signing key, at least 32 bytes, validated at startup (REQ-SEC-001, ADR-0005) |
-| `OUTBOX_POLLING_INTERVAL_MS` | order-service, inventory-service | no (5000) | Interval of the outbox publisher (REQ-FUNC-010) |
+| `ORDER_DB_PASSWORD` | postgres, order-service | yes | Password of the `order_svc` role |
+| `INVENTORY_DB_PASSWORD` | postgres, inventory-service | yes | Password of the `inventory_svc` role |
+| `SEED_CLIENT_ID` | order-service | yes | API client seeded by a Java Flyway migration (ADR-0009) |
+| `SEED_CLIENT_SECRET` | order-service | yes | Its secret; only the BCrypt hash is stored |
+| `JWT_SIGNING_SECRET` | order-service | yes | HS256 signing key, at least 32 bytes, validated at startup |
+| `OUTBOX_POLLING_INTERVAL_MS` | both services | no (5000) | Outbox publisher interval |
 
-**Variables set by `docker-compose.yml`** (no configuration needed)
+`DB_URL`, `DB_SCHEMA`, `DB_USER`, `DB_PASSWORD` and `KAFKA_BOOTSTRAP_SERVERS` are set by
+`docker-compose.yml` and need no configuration. `DB_URL` is the same for both services: the schema
+comes from each role's `search_path`.
 
-| Variable | Used by | Value |
+### Appendix B — Traceability (SRS → design → decisions)
+
+| Requirement | Design views | ADRs |
 |---|---|---|
-| `DB_URL` | both services | `jdbc:postgresql://postgres:5432/rop`; identical for both, the schema comes from each role's `search_path` |
-| `DB_SCHEMA` | both services | `order_service` / `inventory_service`; default schema of Flyway (ADR-0002) |
-| `DB_USER` | both services | `order_svc` / `inventory_svc` |
-| `DB_PASSWORD` | both services | Taken from `ORDER_DB_PASSWORD` / `INVENTORY_DB_PASSWORD` |
-| `KAFKA_BOOTSTRAP_SERVERS` | both services | `kafka:9092` (internal listener) |
-
-### Appendix B â€” Traceability Matrix (SRS â†’ Design View â†’ ADR)
-
-| SRS Requirement | Design View(s) | ADR(s) |
-|---|---|---|
-| REQ-FUNC-001 / 002 | DV-007 | â€” |
-| REQ-FUNC-003 / 004 / 005 | DV-003, DV-006, DV-009 | ADR-0001, ADR-0002 |
-| REQ-FUNC-006 | DV-007 | â€” |
-| REQ-FUNC-007 / 008 / 009 | DV-007 | ADR-0005 |
-| REQ-FUNC-010 / 011 | DV-001, DV-002, DV-009, DV-010, DV-016, DV-019 | ADR-0001 |
-| REQ-FUNC-012 / 013 | DV-004, DV-006, DV-014 | ADR-0010 |
-| REQ-FUNC-014 / 015 | DV-009, DV-015 | â€” |
-| REQ-FUNC-016 | DV-004, DV-011, DV-013 | ADR-0002 |
-| REQ-PERF-001 | N/A â€” implementation benchmark, no dedicated design view | â€” |
-| REQ-SEC-001 / 002 | DV-007, Appendix A | ADR-0005 |
-| REQ-REL-001 | DV-012 | ADR-0004 |
-| REQ-OBS-001 | DV-009 to DV-012 (cross-cutting) | ADR-0008 |
-| REQ-COMP-001 | â€” (outside design scope, see SRS 3.4) | â€” |
-| REQ-INST-001 | DV-018, Appendix A | ADR-0007, ADR-0009 |
-| REQ-BUILD-001 | â€” (outside design scope, see SRS 3.5.2) | â€” |
+| REQ-FUNC-001..006 | DV-003, DV-006, DV-007, DV-009 | ADR-0001, ADR-0014 |
+| REQ-FUNC-007..009, REQ-SEC-001/002 | DV-007, Section 5 | ADR-0005 |
+| REQ-FUNC-010/011 | DV-009, DV-010, DV-016, DV-019 | ADR-0001, ADR-0003 |
+| REQ-FUNC-012/013 | DV-004, DV-014 | ADR-0010 |
+| REQ-FUNC-014/015/019 | DV-009, DV-015 | ADR-0011 |
+| REQ-FUNC-016, REQ-FUNC-020 | DV-011, DV-013 | ADR-0011, ADR-0013 |
+| REQ-FUNC-017 | DV-006 | ADR-0009 |
+| REQ-FUNC-018 | DV-008, DV-018 | ADR-0012 |
+| REQ-REL-001 | DV-012, DV-020 | ADR-0004 |
+| REQ-OBS-001 | DV-018, DV-020 | ADR-0008 |
+| REQ-INST-001, REQ-PORT-001 | DV-018, Appendix A | ADR-0007, ADR-0009 |
 | REQ-MAINT-001 | DV-005 | ADR-0006 |
-| REQ-MAINT-002 | DV-008 | â€” |
-| REQ-PORT-001 | DV-018 | ADR-0007 |
-| REQ-COST-001 | DV-002, DV-018 (cross-cutting) | ADR-0001, ADR-0007 |
-| REQ-CM-001 | â€” (outside design scope, see SRS 3.5.10) | â€” |
+| REQ-MAINT-002 | DV-008 | — |
+
+### Appendix C — Verification
+
+Each design claim above is verified by an automated test. The mapping from behaviour to test is the
+[Evidence](../README.md#evidence) table of the README. Two design choices shape the tests themselves:
+
+- Integration tests use the same environment variables as Docker Compose and connect with the service
+  roles; the outbox publisher and the Kafka listeners do not start on their own and are driven
+  explicitly, because several cached test contexts would otherwise compete for the same tables and
+  consumer groups.
+- System tests run the real `docker-compose.yml` with images built from source, and break it on
+  purpose: a paused broker, a consumer killed with SIGKILL, logs read from the containers.
