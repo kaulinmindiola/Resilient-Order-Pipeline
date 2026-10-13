@@ -49,10 +49,11 @@ Chosen option: **"`NewTopic` beans with 3 partitions and replication factor 1"**
 
 ### Confirmation
 
-Verified by [`KafkaTopicsIT`](../../order-service/src/test/java/io/github/kaulinmindiola/rop/order/adapter/out/kafka/KafkaTopicsIT.java):
-with broker-side auto-creation disabled, the five topics declared by `order-service` exist at
-startup with 3 partitions and replication factor 1. The topics declared by `inventory-service`
-will be verified by its equivalent test.
+Verified in both services by `KafkaTopicsIT`
+([order-service](../../order-service/src/test/java/io/github/kaulinmindiola/rop/order/adapter/out/kafka/KafkaTopicsIT.java),
+[inventory-service](../../inventory-service/src/test/java/io/github/kaulinmindiola/rop/inventory/adapter/out/kafka/KafkaTopicsIT.java)):
+with broker-side auto-creation disabled, every topic each service declares exists at startup with 3
+partitions and replication factor 1. Together they cover the six topics.
 
 ## Pros and Cons of the Options
 
