@@ -7,10 +7,10 @@ All records follow a reduced [MADR](https://adr.github.io/madr/) format. Each on
 1. **Context and Problem Statement**: the forces and requirements behind the decision.
 2. **Decision Drivers** and **Considered Options**.
 3. **Decision Outcome**, including **Consequences** (good and bad, stated honestly).
-4. **Confirmation**: the test or check that demonstrates the decision. Test numbers refer to the evidence tests listed in the main README; links are added in the pull request of the phase that implements each test.
+4. **Confirmation**: the tests that demonstrate the decision, linked to their source. Test numbers refer to the evidence tests listed in the [Evidence](../../README.md#evidence) table of the main README.
 5. **Pros and Cons of the Options** and **More Information** (related ADRs and requirement IDs).
 
-All ADRs are `accepted` as of 2026-10-05.
+All ADRs were `accepted` on 2026-10-05. As of release `v0.1.0`, every decision is confirmed by tests that run in CI on every push.
 
 ## Index
 
